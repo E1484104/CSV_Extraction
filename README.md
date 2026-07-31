@@ -12,6 +12,21 @@ python -m pip install -r requirements.txt
 
 ## Basic Usage
 
+Edit the paths near the top of `config.py`:
+
+```python
+INPUT_PATH = Path(r"input.png")
+OUTPUT_PATH = Path(r"curve.csv")
+```
+
+Then run:
+
+```powershell
+python main.py
+```
+
+You can still override those paths from the command line:
+
 ```powershell
 python main.py --input "path\to\image.png" --output "curve.csv"
 ```
