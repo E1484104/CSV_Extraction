@@ -132,23 +132,53 @@ python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
   --roi "267,151,1024,257"
 ```
 
-For blue Image Peak traces, seam checking is enabled automatically. A frame is appended
-only when the previous tail and current head are close at the stitch seam; otherwise the
-candidate frame is skipped and reported. Accepted seams are also repaired with a small
-overlap max-blend and a short bridge between detected curve endpoints, which reduces
-hard-cut breaks at steep peaks. Disable this conservative behavior if you want every
-frame appended:
+The stitcher detects only blue and green Image Peak traces. The default `--feature auto`
+chooses between those two colors; use `--feature blue` or `--feature green` if the
+automatic choice is not what you want. The default output keeps only the detected curve
+pixels, including horizontal curve segments near the axis, which avoids broken white
+axis fragments in the stitched image.
+
+```powershell
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --feature green
+```
+
+If you want a continuous horizontal axis, add `--draw-axis`:
+
+```powershell
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --draw-axis
+```
+
+Auto ROI is based on the detected curve. If you need to keep more empty graph area
+below the trace, increase only the bottom padding:
+
+```powershell
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --y-padding-bottom 430 --draw-axis
+```
+
+Seam checking is enabled automatically for blue/green traces. The main alignment still
+comes from the whole overlapping waveform region. If an adjacent pair has a very high
+overlap score, the stitcher accepts it even when the exact seam endpoint is missing and
+prints a `seam warning`. This avoids dropping valid frames when the seam lands on a
+short blank part of the curve. Use `--seam-check on` if you want the seam endpoint test
+to be strict. Disable seam checking if you want every frame appended:
 
 ```powershell
 python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
   --seam-check off
 ```
 
-If valid seams are being skipped, relax the vertical seam tolerance:
+If valid adjacent seams are still being skipped, relax the seam tolerances or lower the
+high-score bypass threshold:
 
 ```powershell
 python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
   --max-seam-y-gap 20
+
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --seam-score-bypass 0.90
 ```
 
 ## Specify Curve Color

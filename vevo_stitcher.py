@@ -20,6 +20,7 @@ class StitchPair:
     seam_connected: bool
     seam_horizontal_gap_px: int | None
     seam_vertical_gap_px: float | None
+    seam_warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,13 @@ def blue_mask(image: np.ndarray) -> np.ndarray:
     return (blue > 120) & (blue > red * 1.25) & (blue > green * 1.05)
 
 
+def green_mask(image: np.ndarray) -> np.ndarray:
+    red = image[:, :, 0].astype(np.float64)
+    green = image[:, :, 1].astype(np.float64)
+    blue = image[:, :, 2].astype(np.float64)
+    return (green > 80) & (green > red * 1.35) & (green > blue * 1.35)
+
+
 def gray_signal_mask(image: np.ndarray, threshold: int) -> np.ndarray:
     gray = image.max(axis=2)
     mask = gray > threshold
@@ -139,21 +147,135 @@ def feature_mask(
 ) -> np.ndarray:
     if feature == "blue":
         mask = blue_mask(image)
-    elif feature == "gray":
-        mask = gray_signal_mask(image, threshold=gray_threshold)
-    else:
-        candidate = blue_mask(image)
-        if candidate.sum() >= 500:
-            mask = candidate
-        else:
-            mask = gray_signal_mask(image, threshold=gray_threshold)
-    return remove_static_rows(mask, occupancy_threshold=static_row_occupancy)
+        return remove_static_rows(mask, occupancy_threshold=static_row_occupancy)
+    if feature == "green":
+        mask = green_mask(image)
+        return remove_static_rows(mask, occupancy_threshold=static_row_occupancy)
+
+    if feature == "gray":
+        return remove_static_rows(
+            gray_signal_mask(image, threshold=gray_threshold),
+            occupancy_threshold=static_row_occupancy,
+        )
+
+    blue = remove_static_rows(
+        blue_mask(image),
+        occupancy_threshold=static_row_occupancy,
+    )
+    green = remove_static_rows(
+        green_mask(image),
+        occupancy_threshold=static_row_occupancy,
+    )
+    if blue.sum() >= green.sum():
+        return blue
+    return green
 
 
-def cleanup_preserve_mask(image: np.ndarray, feature: str, gray_threshold: int) -> np.ndarray:
+def curve_mask(image: np.ndarray, feature: str, static_row_occupancy: float) -> np.ndarray:
+    if feature == "blue":
+        return remove_static_rows(blue_mask(image), occupancy_threshold=static_row_occupancy)
+    if feature == "green":
+        return remove_static_rows(green_mask(image), occupancy_threshold=static_row_occupancy)
+    blue = remove_static_rows(blue_mask(image), occupancy_threshold=static_row_occupancy)
+    green = remove_static_rows(green_mask(image), occupancy_threshold=static_row_occupancy)
+    if blue.sum() >= green.sum():
+        return blue
+    return green
+
+
+def raw_curve_mask(image: np.ndarray, feature: str) -> np.ndarray:
+    if feature == "blue":
+        return blue_mask(image)
+    if feature == "green":
+        return green_mask(image)
+
     blue = blue_mask(image)
-    if feature in {"auto", "blue"} and blue.sum() >= 500:
-        return dilate_mask(blue, radius=1)
+    green = green_mask(image)
+    if blue.sum() >= green.sum():
+        return blue
+    return green
+
+
+def resolve_curve_feature(
+    crops: list[np.ndarray],
+    feature: str,
+    static_row_occupancy: float,
+) -> str:
+    if feature != "auto":
+        return feature
+
+    blue_total = 0
+    green_total = 0
+    for crop in crops:
+        blue_total += int(
+            remove_static_rows(
+                blue_mask(crop),
+                occupancy_threshold=static_row_occupancy,
+            ).sum()
+        )
+        green_total += int(
+            remove_static_rows(
+                green_mask(crop),
+                occupancy_threshold=static_row_occupancy,
+            ).sum()
+        )
+    return "blue" if blue_total >= green_total else "green"
+
+
+def output_trace_only(
+    crops: list[np.ndarray],
+    masks: list[np.ndarray],
+    background: int,
+) -> list[np.ndarray]:
+    outputs: list[np.ndarray] = []
+    for crop, mask in zip(crops, masks):
+        output = np.full_like(crop, background)
+        preserve = dilate_mask(mask, radius=1)
+        output[preserve] = crop[preserve]
+        outputs.append(output)
+    return outputs
+
+
+def white_axis_y(crops: list[np.ndarray]) -> int | None:
+    if not crops:
+        return None
+
+    row_scores = np.zeros(crops[0].shape[0], dtype=np.float64)
+    for crop in crops[: min(5, len(crops))]:
+        pixels = crop.astype(np.int16)
+        min_channel = pixels.min(axis=2)
+        max_channel = pixels.max(axis=2)
+        saturation = max_channel - min_channel
+        white = (min_channel > 140) & (saturation < 30)
+        row_scores += white.mean(axis=1)
+
+    row_scores /= min(5, len(crops))
+    y = int(np.argmax(row_scores))
+    if row_scores[y] < 0.25:
+        return None
+    return y
+
+
+def draw_horizontal_axis(image: np.ndarray, y: int | None, background: int) -> None:
+    if y is None or y < 0 or y >= image.shape[0]:
+        return
+    empty = image[y].max(axis=1) <= background + 5
+    image[y, empty] = np.array([190, 190, 190], dtype=np.uint8)
+
+
+def cleanup_preserve_mask(
+    image: np.ndarray,
+    feature: str,
+    gray_threshold: int,
+    static_row_occupancy: float,
+) -> np.ndarray:
+    if feature in {"auto", "blue", "green"}:
+        mask = curve_mask(
+            image,
+            feature=feature,
+            static_row_occupancy=static_row_occupancy,
+        )
+        return dilate_mask(mask, radius=1)
     if feature == "gray":
         return dilate_mask(gray_signal_mask(image, threshold=gray_threshold), radius=1)
     return np.zeros(image.shape[:2], dtype=bool)
@@ -176,13 +298,53 @@ def bbox_from_masks(masks: list[np.ndarray]) -> tuple[int, int, int, int]:
     return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
 
 
+def bbox_from_main_waveform_band(masks: list[np.ndarray]) -> tuple[int, int, int, int] | None:
+    if not masks:
+        return None
+
+    combined = np.zeros(masks[0].shape, dtype=bool)
+    for mask in masks:
+        combined |= mask
+
+    row_counts = combined.sum(axis=1)
+    active_rows = row_counts > 8
+    best: tuple[int, int, int, int, int, int, int] | None = None
+    start: int | None = None
+
+    for y, is_active in enumerate(active_rows):
+        if is_active and start is None:
+            start = y
+        last_row = y == len(active_rows) - 1
+        if (not is_active or last_row) and start is not None:
+            end = y if not is_active else y + 1
+            band = combined[start:end]
+            band_ys, band_xs = np.where(band)
+            if band_xs.size:
+                total = int(band.sum())
+                min_x = int(band_xs.min())
+                max_x = int(band_xs.max())
+                span = max_x - min_x + 1
+                if total >= 50 and span >= 50:
+                    score = total * span
+                    candidate = (score, min_x, start, max_x, end - 1, total, span)
+                    if best is None or candidate[0] > best[0]:
+                        best = candidate
+            start = None
+
+    if best is None:
+        return None
+    _, min_x, min_y, max_x, max_y, _, _ = best
+    return min_x, min_y, max_x, max_y
+
+
 def auto_roi(
     images: list[np.ndarray],
     feature: str,
     gray_threshold: int,
     static_row_occupancy: float,
     x_padding: int,
-    y_padding: int,
+    y_padding_top: int,
+    y_padding_bottom: int,
 ) -> tuple[int, int, int, int]:
     masks = [
         feature_mask(
@@ -193,13 +355,17 @@ def auto_roi(
         )
         for image in images
     ]
-    min_x, min_y, max_x, max_y = bbox_from_masks(masks)
+    main_band = bbox_from_main_waveform_band(masks)
+    if main_band is None:
+        min_x, min_y, max_x, max_y = bbox_from_masks(masks)
+    else:
+        min_x, min_y, max_x, max_y = main_band
     image_height, image_width = images[0].shape[:2]
 
     x = max(0, min_x - x_padding)
-    y = max(0, min_y - y_padding)
+    y = max(0, min_y - y_padding_top)
     right = min(image_width, max_x + x_padding + 1)
-    bottom = min(image_height, max_y + y_padding + 1)
+    bottom = min(image_height, max_y + y_padding_bottom + 1)
     return x, y, right - x, bottom - y
 
 
@@ -242,7 +408,9 @@ def seam_check_enabled(mode: str, previous_crop: np.ndarray, current_crop: np.nd
         return False
     if mode == "on":
         return True
-    return blue_mask(previous_crop).sum() >= 500 and blue_mask(current_crop).sum() >= 500
+    previous_count = blue_mask(previous_crop).sum() + green_mask(previous_crop).sum()
+    current_count = blue_mask(current_crop).sum() + green_mask(current_crop).sum()
+    return previous_count >= 500 and current_count >= 500
 
 
 def edge_column_points(
@@ -489,6 +657,7 @@ def stitch_crops(
     seam_window: int,
     max_seam_gap: int,
     max_seam_y_gap: float,
+    seam_score_bypass: float,
     blend_width: int,
     bridge_seams: bool,
     bridge_width: int,
@@ -530,22 +699,29 @@ def stitch_crops(
                 max_vertical_gap=max_seam_y_gap,
             )
             if not connected:
-                skipped.append(
-                    SkippedPair(
-                        previous=paths[accepted_index],
-                        current=paths[candidate_index],
-                        shift_px=shift,
-                        score=score,
-                        reason=(
-                            "seam disconnected"
-                            if seam_horizontal_gap is not None
-                            else "missing seam feature"
-                        ),
-                        seam_horizontal_gap_px=seam_horizontal_gap,
-                        seam_vertical_gap_px=seam_vertical_gap,
-                    )
+                seam_reason = (
+                    "seam disconnected"
+                    if seam_horizontal_gap is not None
+                    else "missing seam feature"
                 )
-                continue
+                can_accept_high_score = (
+                    seam_check == "auto"
+                    and candidate_index == accepted_index + 1
+                    and score >= seam_score_bypass
+                )
+                if not can_accept_high_score:
+                    skipped.append(
+                        SkippedPair(
+                            previous=paths[accepted_index],
+                            current=paths[candidate_index],
+                            shift_px=shift,
+                            score=score,
+                            reason=seam_reason,
+                            seam_horizontal_gap_px=seam_horizontal_gap,
+                            seam_vertical_gap_px=seam_vertical_gap,
+                        )
+                    )
+                    continue
 
         max_blend_overlap(
             stitched=stitched,
@@ -576,6 +752,7 @@ def stitch_crops(
                 seam_connected=connected,
                 seam_horizontal_gap_px=seam_horizontal_gap,
                 seam_vertical_gap_px=seam_vertical_gap,
+                seam_warning=None if connected else seam_reason,
             )
         )
         accepted_index = candidate_index
@@ -597,27 +774,31 @@ def stitch_images(args: argparse.Namespace) -> StitchResult:
             gray_threshold=args.gray_threshold,
             static_row_occupancy=args.static_row_occupancy,
             x_padding=args.x_padding,
-            y_padding=args.y_padding,
+            y_padding_top=(
+                args.y_padding if args.y_padding_top is None else args.y_padding_top
+            ),
+            y_padding_bottom=(
+                args.y_padding if args.y_padding_bottom is None else args.y_padding_bottom
+            ),
         )
 
     crops = [crop_image(image, roi) for image in images]
+    curve_feature = resolve_curve_feature(
+        crops,
+        feature=args.feature,
+        static_row_occupancy=args.static_row_occupancy,
+    )
     masks = [
         feature_mask(
             crop,
-            feature=args.feature,
+            feature=curve_feature,
             gray_threshold=args.gray_threshold,
             static_row_occupancy=args.static_row_occupancy,
         )
         for crop in crops
     ]
-    preserve_masks = [
-        cleanup_preserve_mask(
-            crop,
-            feature=args.feature,
-            gray_threshold=args.gray_threshold,
-        )
-        for crop in crops
-    ]
+    output_masks = [raw_curve_mask(crop, feature=curve_feature) for crop in crops]
+    axis_y = white_axis_y(crops) if args.draw_axis else None
     paths, crops, masks, reversed_order = choose_order(
         paths=paths,
         crops=crops,
@@ -627,13 +808,14 @@ def stitch_images(args: argparse.Namespace) -> StitchResult:
         max_shift=args.max_shift,
     )
     if reversed_order:
-        preserve_masks = list(reversed(preserve_masks))
+        output_masks = list(reversed(output_masks))
 
-    output_crops = crops
-    if not args.keep_static:
-        output_crops = apply_static_cleanup(
+    if args.keep_static:
+        output_crops = crops
+    else:
+        output_crops = output_trace_only(
             crops,
-            preserve_masks=preserve_masks,
+            masks=output_masks,
             background=args.background,
         )
 
@@ -648,10 +830,13 @@ def stitch_images(args: argparse.Namespace) -> StitchResult:
         seam_window=args.seam_window,
         max_seam_gap=args.max_seam_gap,
         max_seam_y_gap=args.max_seam_y_gap,
+        seam_score_bypass=args.seam_score_bypass,
         blend_width=args.blend_width,
         bridge_seams=not args.no_bridge_seams,
         bridge_width=args.bridge_width,
     )
+    if args.draw_axis and not args.keep_static:
+        draw_horizontal_axis(stitched, axis_y, background=args.background)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(stitched).save(args.output)
@@ -690,9 +875,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--feature",
-        choices=["auto", "blue", "gray"],
+        choices=["auto", "blue", "green"],
         default="auto",
-        help="Feature used for alignment. Default: auto.",
+        help="Curve color used for alignment. Default: auto chooses blue or green.",
     )
     parser.add_argument(
         "--order",
@@ -707,7 +892,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--seam-check",
         choices=["auto", "on", "off"],
         default="auto",
-        help="Only accept pairs whose tail/head seam is connected. Default: auto for blue curves.",
+        help="Check tail/head seam continuity. Auto allows high-score adjacent pairs. Default: auto.",
     )
     parser.add_argument(
         "--seam-window",
@@ -724,8 +909,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-seam-y-gap",
         type=float,
-        default=15.0,
-        help="Maximum vertical feature gap allowed at the seam. Default: 15.",
+        default=20.0,
+        help="Maximum vertical feature gap allowed at the seam. Default: 20.",
+    )
+    parser.add_argument(
+        "--seam-score-bypass",
+        type=float,
+        default=0.95,
+        help=(
+            "In auto seam mode, accept adjacent pairs above this score even if "
+            "the seam endpoint check is inconclusive. Default: 0.95."
+        ),
     )
     parser.add_argument(
         "--blend-width",
@@ -746,7 +940,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--x-padding", type=int, default=0, help="Auto ROI horizontal padding. Default: 0.")
     parser.add_argument("--y-padding", type=int, default=70, help="Auto ROI vertical padding. Default: 70.")
-    parser.add_argument("--gray-threshold", type=int, default=18, help="Gray feature brightness threshold. Default: 18.")
+    parser.add_argument(
+        "--y-padding-top",
+        type=int,
+        help="Auto ROI top padding. Overrides --y-padding for the top side.",
+    )
+    parser.add_argument(
+        "--y-padding-bottom",
+        type=int,
+        help="Auto ROI bottom padding. Overrides --y-padding for the bottom side.",
+    )
+    parser.add_argument("--gray-threshold", type=int, default=18, help=argparse.SUPPRESS)
     parser.add_argument(
         "--static-row-occupancy",
         type=float,
@@ -756,7 +960,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--keep-static",
         action="store_true",
-        help="Keep static overlays such as baseline, logo, and axis elements in stitched output.",
+        help="Keep original non-curve pixels and static overlays in stitched output.",
+    )
+    parser.add_argument(
+        "--draw-axis",
+        action="store_true",
+        help="Draw one continuous horizontal white axis behind the stitched curve.",
     )
     parser.add_argument(
         "--background",
@@ -782,6 +991,8 @@ def print_result(result: StitchResult) -> None:
                 f" | seam dx {pair.seam_horizontal_gap_px}px"
                 f" dy {pair.seam_vertical_gap_px:.1f}px"
             )
+        if pair.seam_warning:
+            seam_info += f" | seam warning: {pair.seam_warning}"
         print(
             f"{pair.previous.name} -> {pair.current.name} | "
             f"shift {pair.shift_px}px | score {pair.score:.4f}"
