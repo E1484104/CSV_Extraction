@@ -21,12 +21,13 @@ def process_image(
 
     plot_path = None
     if not getattr(args, "no_plot", False):
-        plot_path = plot_path_for(
-            input_image=image_path,
-            input_root=input_root,
-            csv_path=csv_path,
-            plot_output=getattr(args, "plot_output", None),
-        )
+        if getattr(args, "save_plot", False) or getattr(args, "plot_output", None) is not None:
+            plot_path = plot_path_for(
+                input_image=image_path,
+                input_root=input_root,
+                csv_path=csv_path,
+                plot_output=getattr(args, "plot_output", None),
+            )
         write_line_plot(plot_path, result.rows)
 
     return ProcessedImage(

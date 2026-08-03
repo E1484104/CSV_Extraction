@@ -3,10 +3,6 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-
 from matplotlib import pyplot as plt
 from matplotlib.ticker import MaxNLocator
 
@@ -48,7 +44,7 @@ def _expanded_bounds(values: list[float]) -> tuple[float, float]:
     return lower - padding, upper + padding
 
 
-def write_line_plot(plot_path: Path, rows: list[dict[str, float]]) -> None:
+def write_line_plot(plot_path: Path | None, rows: list[dict[str, float]]) -> None:
     x_key, y_key = _point_columns(rows)
     points = _finite_points(rows, x_key, y_key)
     if not points:
@@ -59,9 +55,10 @@ def write_line_plot(plot_path: Path, rows: list[dict[str, float]]) -> None:
     x_min, x_max = _expanded_bounds(xs)
     y_min, y_max = _expanded_bounds(ys)
 
-    plot_path.parent.mkdir(parents=True, exist_ok=True)
     figure, axis = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
     try:
+        if figure.canvas.manager is not None:
+            figure.canvas.manager.set_window_title("Extracted Curve")
         figure.patch.set_facecolor("white")
         axis.set_facecolor("#fbfcfe")
 
@@ -85,7 +82,10 @@ def write_line_plot(plot_path: Path, rows: list[dict[str, float]]) -> None:
         axis.tick_params(colors="#2e343c", labelsize=9)
 
         figure.tight_layout()
-        figure.savefig(plot_path, format="png")
+        if plot_path is not None:
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(plot_path, format="png")
+        plt.show()
     finally:
         plt.close(figure)
 
@@ -119,7 +119,7 @@ def _channel_points(
 
 
 def write_wav_envelope_plot(
-    plot_path: Path,
+    plot_path: Path | None,
     rows: list[dict[str, float | str | None]],
     time_start_s: float | None = 0.0,
     time_end_s: float | None = 1.1,
@@ -160,9 +160,10 @@ def write_wav_envelope_plot(
     else:
         y_min, y_max = _expanded_bounds(all_values)
 
-    plot_path.parent.mkdir(parents=True, exist_ok=True)
     figure, axis = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
     try:
+        if figure.canvas.manager is not None:
+            figure.canvas.manager.set_window_title("Doppler STFT Rolloff Envelope")
         figure.patch.set_facecolor("white")
         axis.set_facecolor("#fbfcfe")
 
@@ -185,6 +186,9 @@ def write_wav_envelope_plot(
         axis.tick_params(colors="#2e343c", labelsize=9)
 
         figure.tight_layout()
-        figure.savefig(plot_path, format="png")
+        if plot_path is not None:
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(plot_path, format="png")
+        plt.show()
     finally:
         plt.close(figure)

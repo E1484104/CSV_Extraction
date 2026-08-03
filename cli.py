@@ -34,13 +34,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "PNG path for one image, or output directory for an input directory. "
-            "Default: same stem as the CSV output."
+            "Also enables automatic plot saving."
         ),
+    )
+    parser.add_argument(
+        "--save-plot",
+        action="store_true",
+        help="Automatically save plot PNG files in addition to showing Matplotlib windows.",
     )
     parser.add_argument(
         "--no-plot",
         action="store_true",
-        help="Skip creating a line plot PNG after CSV extraction.",
+        help="Skip showing and saving plots after CSV extraction.",
     )
     parser.add_argument(
         "--target-color",

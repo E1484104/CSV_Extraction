@@ -562,11 +562,12 @@ def process_wav(args: argparse.Namespace) -> WavEnvelopeResult:
 
     plot_path = None
     if not getattr(args, "no_plot", False):
-        plot_path = wav_plot_path_for(
-            wav_path=wav_path,
-            csv_path=csv_path,
-            plot_output=getattr(args, "plot_output", None),
-        )
+        if getattr(args, "save_plot", False) or getattr(args, "plot_output", None) is not None:
+            plot_path = wav_plot_path_for(
+                wav_path=wav_path,
+                csv_path=csv_path,
+                plot_output=getattr(args, "plot_output", None),
+            )
         plot_end_s = (
             None
             if args.wav_plot_duration is None

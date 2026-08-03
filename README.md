@@ -25,8 +25,8 @@ Then run:
 python main.py
 ```
 
-After each CSV is written, the script also writes a line plot PNG next to it using the
-same stem, for example `curve.csv` and `curve.png`.
+After each CSV is written, the script opens a Matplotlib plot window. Use the window
+toolbar to save the plot manually, or close the window without saving.
 
 You can still override those paths from the command line:
 
@@ -46,11 +46,17 @@ x_norm,y_norm,x_px,y_px
 
 ## Line Plot
 
-By default, the line plot is written as a PNG with the same stem as the CSV output.
-If calibrated columns are available, the plot uses `x_value` and `y_value`; otherwise
-it uses `x_norm` and `y_norm`. Plots are rendered with Matplotlib.
+By default, the line plot is shown in a Matplotlib window and is not saved
+automatically. If calibrated columns are available, the plot uses `x_value` and
+`y_value`; otherwise it uses `x_norm` and `y_norm`.
 
-Specify a plot path for one image:
+Automatically save a PNG next to the CSV while still showing the window:
+
+```powershell
+python main.py --input "image.png" --output "curve.csv" --save-plot
+```
+
+Specify a saved plot path for one image:
 
 ```powershell
 python main.py --input "image.png" --output "curve.csv" --plot-output "curve_plot.png"
