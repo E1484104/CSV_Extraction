@@ -55,3 +55,4 @@ class ProcessedImage:
     image_path: Path
     csv_path: Path
     result: ExtractResult
+    plot_path: Path | None = None

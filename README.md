@@ -25,6 +25,9 @@ Then run:
 python main.py
 ```
 
+After each CSV is written, the script also writes a line plot PNG next to it using the
+same stem, for example `curve.csv` and `curve.png`.
+
 You can still override those paths from the command line:
 
 ```powershell
@@ -40,6 +43,30 @@ x_norm,y_norm,x_px,y_px
 ```
 
 `x_norm` runs from left to right. `y_norm` is normalized bottom-to-top, which matches normal plot coordinates.
+
+## Line Plot
+
+By default, the line plot is written as a PNG with the same stem as the CSV output.
+If calibrated columns are available, the plot uses `x_value` and `y_value`; otherwise
+it uses `x_norm` and `y_norm`. Plots are rendered with Matplotlib.
+
+Specify a plot path for one image:
+
+```powershell
+python main.py --input "image.png" --output "curve.csv" --plot-output "curve_plot.png"
+```
+
+For batch processing, `--plot-output` is treated as a directory:
+
+```powershell
+python main.py --input "images" --output "csv" --plot-output "plots"
+```
+
+Skip plot generation and keep CSV-only output:
+
+```powershell
+python main.py --input "image.png" --output "curve.csv" --no-plot
+```
 
 ## Specify Curve Color
 

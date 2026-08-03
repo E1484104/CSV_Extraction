@@ -27,6 +27,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--plot-output",
+        type=Path,
+        help=(
+            "PNG path for one image, or output directory for an input directory. "
+            "Default: same stem as the CSV output."
+        ),
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip creating a line plot PNG after CSV extraction.",
+    )
+    parser.add_argument(
         "--target-color",
         type=parse_color,
         help="Curve color as #RRGGBB or R,G,B. If omitted, the script chooses automatically.",
@@ -53,8 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--smooth-window",
         type=int,
-        default=3,
-        help="Rolling median smoothing window. Use 1 to disable. Default: 3.",
+        default=1,
+        help="Rolling median smoothing window. Use 1 to disable. Default: 1.",
     )
     parser.add_argument(
         "--min-area",
