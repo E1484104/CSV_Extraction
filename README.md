@@ -68,6 +68,83 @@ Skip plot generation and keep CSV-only output:
 python main.py --input "image.png" --output "curve.csv" --no-plot
 ```
 
+## WAV Doppler Envelope
+
+The program can also read standard uncompressed signed 16-bit PCM WAV files directly.
+For WAV input, it does not use image recognition. It runs an STFT on each channel and
+estimates a per-frequency background noise floor over time. It subtracts that noise
+floor from each time window, keeps continuous frequency regions above threshold, and
+uses spectral roll-off to estimate the Doppler frequency boundary. This avoids treating
+isolated high-frequency noise near Nyquist as the envelope.
+
+```powershell
+python main.py --input "Wave.wav" --output "Wave.csv"
+```
+
+The WAV CSV uses long format so channels are kept separate before their physical
+meaning is confirmed:
+
+```csv
+time_s,channel,peak_frequency_hz,envelope_normalized,raw_peak_frequency_hz,confidence,snr_db,is_interpolated
+0.02321995465,channel_1,1234.56,0.1436,1241.02,0.82,18.2,0
+0.02321995465,channel_0,1320.67,0.1545,1318.44,0.61,15.4,0
+```
+
+`channel_1` is processed first because it is usually the stronger Doppler channel, but
+both channels are retained. `envelope_normalized` maps `peak_frequency_hz` into the
+analysis band, so the default 100-8000 Hz band maps to 0-1. Low-confidence detections
+are set to blank and only short gaps are interpolated. This is a frequency boundary
+estimate, not `abs(samples)`, Hilbert envelope, or sliding RMS.
+
+The WAV plot defaults to the first 1.1 seconds and uses `envelope_normalized`, which
+is the right scale for comparing against a 1.1-second exported image trace.
+
+Useful WAV tuning options:
+
+```powershell
+python main.py --input "Wave.wav" --output "Wave.csv" `
+  --wav-stft-window 2048 --wav-stft-hop 256 `
+  --wav-threshold-db 8 --wav-noise-percentile 20 `
+  --wav-min-frequency 100 --wav-max-frequency 8000 `
+  --wav-rolloff-percentile 95
+```
+
+## Experimental Vevo Stitching
+
+`vevo_stitcher.py` is a standalone helper for stitching rolling-window Vevo PNG
+exports. It is not connected to `main.py` yet.
+
+```powershell
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png"
+```
+
+For files listed in reverse time order, the default `--order auto` can usually detect
+and reverse them. If auto ROI is not reliable, provide the waveform crop manually:
+
+```powershell
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --roi "267,151,1024,257"
+```
+
+For blue Image Peak traces, seam checking is enabled automatically. A frame is appended
+only when the previous tail and current head are close at the stitch seam; otherwise the
+candidate frame is skipped and reported. Accepted seams are also repaired with a small
+overlap max-blend and a short bridge between detected curve endpoints, which reduces
+hard-cut breaks at steep peaks. Disable this conservative behavior if you want every
+frame appended:
+
+```powershell
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --seam-check off
+```
+
+If valid seams are being skipped, relax the vertical seam tolerance:
+
+```powershell
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --max-seam-y-gap 20
+```
+
 ## Specify Curve Color
 
 Automatic color detection works when the target curve is the dominant bright saturated color. If the image has several colored traces or labels, specify the curve color:
