@@ -125,12 +125,19 @@ python vevo_stitcher.py --input "frames" --output "stitched_waveform.png"
 ```
 
 For files listed in reverse time order, the default `--order auto` can usually detect
-and reverse them. If auto ROI is not reliable, provide the waveform crop manually:
+and reverse them. Full-screen `1412x932` Vevo exports use a built-in fixed waveform ROI
+of `267,155,1024,616`, so separate stitched outputs keep the same height and vertical
+pixel coordinate system. If the layout is different, provide the waveform crop manually:
 
 ```powershell
 python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
-  --roi "267,151,1024,257"
+  --roi "267,155,1024,616"
 ```
+
+Input images may have different widths as long as their heights and y-axis pixel scale
+match. The matcher compares only the actual same-width overlap region. By default it
+searches shifts up to the narrower image width minus `--min-overlap`. Use `--max-shift`
+only when you want to manually cap that search range.
 
 The stitcher detects only blue and green Image Peak traces. The default `--feature auto`
 chooses between those two colors; use `--feature blue` or `--feature green` if the
@@ -150,20 +157,23 @@ python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
   --draw-axis
 ```
 
-Auto ROI is based on the detected curve. If you need to keep more empty graph area
-below the trace, increase only the bottom padding:
+For non-standard layouts, use `--auto-roi` to fall back to curve-based ROI detection.
+If you need to keep more empty graph area below the trace in that mode, increase only
+the bottom padding:
 
 ```powershell
 python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
-  --y-padding-bottom 430 --draw-axis
+  --auto-roi --y-padding-bottom 430 --draw-axis
 ```
 
 Seam checking is enabled automatically for blue/green traces. The main alignment still
 comes from the whole overlapping waveform region. If an adjacent pair has a very high
 overlap score, the stitcher accepts it even when the exact seam endpoint is missing and
-prints a `seam warning`. This avoids dropping valid frames when the seam lands on a
-short blank part of the curve. Use `--seam-check on` if you want the seam endpoint test
-to be strict. Disable seam checking if you want every frame appended:
+prints a `seam warning`. If one or more frames are skipped, the default recovery mode
+accepts a later frame by overlap score only; it does not assume a fixed `102/103px`
+step. Use `--skip-recovery-mode expected-shift` if you want the stricter raw-frame
+behavior that also checks recent shift trends. Use `--seam-check on` if you want the
+seam endpoint test to be strict. Disable seam checking if you want every frame appended:
 
 ```powershell
 python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
@@ -171,7 +181,8 @@ python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
 ```
 
 If valid adjacent seams are still being skipped, relax the seam tolerances or lower the
-high-score bypass threshold:
+high-score bypass threshold. If you use expected-shift recovery and it is too strict,
+relax the recovery shift tolerance:
 
 ```powershell
 python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
@@ -179,6 +190,9 @@ python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
 
 python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
   --seam-score-bypass 0.90
+
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --skip-recovery-mode expected-shift --skip-recovery-tolerance 35
 ```
 
 ## Specify Curve Color

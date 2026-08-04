@@ -9,6 +9,11 @@ from PIL import Image
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+DEFAULT_ROIS_BY_IMAGE_SIZE = {
+    # Full-screen Vevo 3100 exports used in the current data sets.
+    # This covers the velocity waveform plot area but excludes the lower BPM/RR/C panel.
+    (1412, 932): (267, 155, 1024, 616),
+}
 
 
 @dataclass(frozen=True)
@@ -78,20 +83,36 @@ def image_paths_from_inputs(inputs: list[Path]) -> list[Path]:
 
 def load_images(paths: list[Path]) -> list[np.ndarray]:
     images: list[np.ndarray] = []
-    expected_shape: tuple[int, int, int] | None = None
+    expected_height: int | None = None
     for path in paths:
         with Image.open(path) as image:
             array = np.asarray(image.convert("RGB"), dtype=np.uint8)
-        if expected_shape is None:
-            expected_shape = array.shape
-        elif array.shape != expected_shape:
+        if expected_height is None:
+            expected_height = array.shape[0]
+        elif array.shape[0] != expected_height:
             raise RuntimeError(
-                f"All images must have the same size. "
-                f"{path} has {array.shape[1]}x{array.shape[0]}, expected "
-                f"{expected_shape[1]}x{expected_shape[0]}."
+                f"All images must have the same height. "
+                f"{path} has height {array.shape[0]}, expected {expected_height}. "
+                "Different widths are allowed, but different heights usually mean "
+                "the waveform y-scale is inconsistent."
             )
         images.append(array)
     return images
+
+
+def default_roi_for_images(images: list[np.ndarray]) -> tuple[int, int, int, int] | None:
+    if not images:
+        return None
+
+    image_height, image_width = images[0].shape[:2]
+    roi = DEFAULT_ROIS_BY_IMAGE_SIZE.get((image_width, image_height))
+    if roi is None:
+        return None
+
+    x, y, width, height = roi
+    if x + width > image_width or y + height > image_height:
+        return None
+    return roi
 
 
 def blue_mask(image: np.ndarray) -> np.ndarray:
@@ -302,11 +323,14 @@ def bbox_from_main_waveform_band(masks: list[np.ndarray]) -> tuple[int, int, int
     if not masks:
         return None
 
-    combined = np.zeros(masks[0].shape, dtype=bool)
-    for mask in masks:
-        combined |= mask
+    height = masks[0].shape[0]
+    if any(mask.shape[0] != height for mask in masks):
+        return None
 
-    row_counts = combined.sum(axis=1)
+    row_counts = np.zeros(height, dtype=np.int64)
+    for mask in masks:
+        row_counts += mask.sum(axis=1)
+
     active_rows = row_counts > 8
     best: tuple[int, int, int, int, int, int, int] | None = None
     start: int | None = None
@@ -317,12 +341,18 @@ def bbox_from_main_waveform_band(masks: list[np.ndarray]) -> tuple[int, int, int
         last_row = y == len(active_rows) - 1
         if (not is_active or last_row) and start is not None:
             end = y if not is_active else y + 1
-            band = combined[start:end]
-            band_ys, band_xs = np.where(band)
-            if band_xs.size:
-                total = int(band.sum())
-                min_x = int(band_xs.min())
-                max_x = int(band_xs.max())
+            xs_all: list[np.ndarray] = []
+            total = 0
+            for mask in masks:
+                band = mask[start:end]
+                band_ys, band_xs = np.where(band)
+                if band_xs.size:
+                    xs_all.append(band_xs)
+                    total += int(band.sum())
+            if xs_all:
+                xs = np.concatenate(xs_all)
+                min_x = int(xs.min())
+                max_x = int(xs.max())
                 span = max_x - min_x + 1
                 if total >= 50 and span >= 50:
                     score = total * span
@@ -374,11 +404,59 @@ def crop_image(image: np.ndarray, roi: tuple[int, int, int, int]) -> np.ndarray:
     return image[y : y + height, x : x + width]
 
 
-def f_score_for_shift(previous: np.ndarray, current: np.ndarray, shift: int) -> float:
-    if shift <= 0 or shift >= previous.shape[1]:
+def overlap_slices_for_shift(
+    previous_width: int,
+    current_width: int,
+    shift: int,
+    min_overlap: int = 1,
+) -> tuple[slice, slice, int] | None:
+    if shift <= 0 or shift >= previous_width:
+        return None
+
+    overlap_width = min(previous_width - shift, current_width)
+    if overlap_width < min_overlap:
+        return None
+
+    previous_slice = slice(shift, shift + overlap_width)
+    current_slice = slice(0, overlap_width)
+    return previous_slice, current_slice, overlap_width
+
+
+def append_start_for_shift(previous_width: int, current_width: int, shift: int) -> int | None:
+    slices = overlap_slices_for_shift(
+        previous_width=previous_width,
+        current_width=current_width,
+        shift=shift,
+    )
+    if slices is None:
+        return None
+
+    _, _, overlap_width = slices
+    return overlap_width
+
+
+def automatic_max_shift(previous_width: int, current_width: int, min_overlap: int) -> int:
+    return min(previous_width, current_width) - min_overlap
+
+
+def f_score_for_shift(
+    previous: np.ndarray,
+    current: np.ndarray,
+    shift: int,
+    min_overlap: int,
+) -> float:
+    slices = overlap_slices_for_shift(
+        previous_width=previous.shape[1],
+        current_width=current.shape[1],
+        shift=shift,
+        min_overlap=min_overlap,
+    )
+    if slices is None:
         return -1.0
-    previous_overlap = previous[:, shift:]
-    current_overlap = current[:, :-shift]
+
+    previous_slice, current_slice, _ = slices
+    previous_overlap = previous[:, previous_slice]
+    current_overlap = current[:, current_slice]
     intersection = np.logical_and(previous_overlap, current_overlap).sum()
     total = previous_overlap.sum() + current_overlap.sum()
     if total == 0:
@@ -390,17 +468,50 @@ def estimate_shift(
     previous: np.ndarray,
     current: np.ndarray,
     min_shift: int,
-    max_shift: int,
+    max_shift: int | None,
+    min_overlap: int,
 ) -> tuple[int, float]:
-    max_shift = min(max_shift, previous.shape[1] - 1)
-    if min_shift > max_shift:
-        raise ValueError("Shift search range is outside the ROI width")
+    resolved_max_shift = automatic_max_shift(
+        previous_width=previous.shape[1],
+        current_width=current.shape[1],
+        min_overlap=min_overlap,
+    )
+    if max_shift is not None:
+        resolved_max_shift = min(resolved_max_shift, max_shift)
+    if min_shift > resolved_max_shift:
+        raise ValueError(
+            "Shift search range is outside the available overlap. "
+            f"min_shift={min_shift}, max_shift={resolved_max_shift}, "
+            f"min_overlap={min_overlap}."
+        )
 
     scores = [
-        (shift, f_score_for_shift(previous, current, shift))
-        for shift in range(min_shift, max_shift + 1)
+        (shift, f_score_for_shift(previous, current, shift, min_overlap=min_overlap))
+        for shift in range(min_shift, resolved_max_shift + 1)
     ]
     return max(scores, key=lambda item: item[1])
+
+
+def median_recent_shift_per_frame(values: list[float], limit: int = 8) -> float | None:
+    if not values:
+        return None
+    recent = values[-limit:]
+    return float(np.median(np.asarray(recent, dtype=np.float64)))
+
+
+def stitch_warning(
+    connected: bool,
+    seam_reason: str | None,
+    frame_gap: int,
+) -> str | None:
+    warnings: list[str] = []
+    if not connected and seam_reason:
+        warnings.append(seam_reason)
+    if frame_gap > 1:
+        warnings.append(f"skipped-frame recovery: gap {frame_gap}")
+    if not warnings:
+        return None
+    return "; ".join(warnings)
 
 
 def seam_check_enabled(mode: str, previous_crop: np.ndarray, current_crop: np.ndarray) -> bool:
@@ -460,13 +571,22 @@ def seam_connection(
     max_horizontal_gap: int,
     max_vertical_gap: float,
 ) -> tuple[bool, int | None, float | None]:
-    width = previous_mask.shape[1]
-    strip_start = width - shift
+    slices = overlap_slices_for_shift(
+        previous_width=previous_mask.shape[1],
+        current_width=current_mask.shape[1],
+        shift=shift,
+    )
+    if slices is None:
+        return False, None, None
+
+    _, _, overlap_width = slices
+    previous_width = previous_mask.shape[1]
+    strip_start = overlap_width
 
     previous_point = edge_column_points(
         previous_mask,
-        start_x=width - seam_window,
-        end_x=width,
+        start_x=previous_width - seam_window,
+        end_x=previous_width,
         prefer="right",
     )
     current_point = edge_column_points(
@@ -480,7 +600,7 @@ def seam_connection(
 
     previous_x, previous_ys = previous_point
     current_x, current_ys = current_point
-    horizontal_gap = (width - 1 - previous_x) + (current_x - strip_start)
+    horizontal_gap = (previous_width - 1 - previous_x) + (current_x - strip_start)
     vertical_gap = minimum_vertical_gap(previous_ys, current_ys)
     connected = horizontal_gap <= max_horizontal_gap and vertical_gap <= max_vertical_gap
     return connected, int(horizontal_gap), vertical_gap
@@ -489,20 +609,18 @@ def seam_connection(
 def max_blend_overlap(
     stitched: np.ndarray,
     current_crop: np.ndarray,
-    shift: int,
+    append_start: int,
     blend_width: int,
 ) -> None:
     if blend_width <= 0:
         return
 
-    crop_width = current_crop.shape[1]
-    strip_start = crop_width - shift
-    width = min(blend_width, stitched.shape[1], strip_start)
+    width = min(blend_width, stitched.shape[1], append_start)
     if width <= 0:
         return
 
     stitched_tail = stitched[:, -width:]
-    current_overlap = current_crop[:, strip_start - width : strip_start]
+    current_overlap = current_crop[:, append_start - width : append_start]
     stitched[:, -width:] = np.maximum(stitched_tail, current_overlap)
 
 
@@ -542,14 +660,33 @@ def bridge_seam(
     max_vertical_gap: float,
     line_width: int,
 ) -> None:
-    crop_width = previous_crop.shape[1]
-    strip_start = crop_width - shift
-    stitched_width_before_append = stitched.shape[1] - shift
+    slices = overlap_slices_for_shift(
+        previous_width=previous_crop.shape[1],
+        current_width=current_crop.shape[1],
+        shift=shift,
+    )
+    if slices is None:
+        return
+
+    _, _, overlap_width = slices
+    previous_width = previous_crop.shape[1]
+    strip_start = overlap_width
+    append_start = append_start_for_shift(
+        previous_width=previous_width,
+        current_width=current_crop.shape[1],
+        shift=shift,
+    )
+    if append_start is None:
+        return
+    appended_width = current_crop.shape[1] - append_start
+    if appended_width <= 0:
+        return
+    stitched_width_before_append = stitched.shape[1] - appended_width
 
     previous_point = edge_column_points(
         previous_mask,
-        start_x=crop_width - seam_window,
-        end_x=crop_width,
+        start_x=previous_width - seam_window,
+        end_x=previous_width,
         prefer="right",
     )
     current_point = edge_column_points(
@@ -568,7 +705,7 @@ def bridge_seam(
     if abs(previous_y - current_y) > max_vertical_gap:
         return
 
-    start_x = stitched_width_before_append - crop_width + previous_x
+    start_x = stitched_width_before_append - previous_width + previous_x
     end_x = stitched_width_before_append + (current_x - strip_start)
     color = np.maximum(
         feature_color(previous_crop, previous_x, previous_ys),
@@ -586,10 +723,17 @@ def bridge_seam(
 def mean_order_score(
     masks: list[np.ndarray],
     min_shift: int,
-    max_shift: int,
+    max_shift: int | None,
+    min_overlap: int,
 ) -> float:
     scores = [
-        estimate_shift(masks[index], masks[index + 1], min_shift, max_shift)[1]
+        estimate_shift(
+            masks[index],
+            masks[index + 1],
+            min_shift,
+            max_shift,
+            min_overlap,
+        )[1]
         for index in range(len(masks) - 1)
     ]
     return float(np.mean(scores)) if scores else -1.0
@@ -601,16 +745,17 @@ def choose_order(
     masks: list[np.ndarray],
     order: str,
     min_shift: int,
-    max_shift: int,
+    max_shift: int | None,
+    min_overlap: int,
 ) -> tuple[list[Path], list[np.ndarray], list[np.ndarray], bool]:
     if order == "given":
         return paths, crops, masks, False
     if order == "reverse":
         return list(reversed(paths)), list(reversed(crops)), list(reversed(masks)), True
 
-    given_score = mean_order_score(masks, min_shift, max_shift)
+    given_score = mean_order_score(masks, min_shift, max_shift, min_overlap)
     reversed_masks = list(reversed(masks))
-    reversed_score = mean_order_score(reversed_masks, min_shift, max_shift)
+    reversed_score = mean_order_score(reversed_masks, min_shift, max_shift, min_overlap)
     if reversed_score > given_score:
         return (
             list(reversed(paths)),
@@ -651,13 +796,16 @@ def stitch_crops(
     crops: list[np.ndarray],
     masks: list[np.ndarray],
     min_shift: int,
-    max_shift: int,
+    max_shift: int | None,
+    min_overlap: int,
     min_score: float,
     seam_check: str,
     seam_window: int,
     max_seam_gap: int,
     max_seam_y_gap: float,
     seam_score_bypass: float,
+    skip_recovery_mode: str,
+    skip_recovery_tolerance: float,
     blend_width: int,
     bridge_seams: bool,
     bridge_width: int,
@@ -666,13 +814,31 @@ def stitch_crops(
     pairs: list[StitchPair] = []
     skipped: list[SkippedPair] = []
     accepted_index = 0
+    shift_per_frame_values: list[float] = []
 
     for candidate_index in range(1, len(crops)):
+        frame_gap = candidate_index - accepted_index
+        typical_shift = median_recent_shift_per_frame(shift_per_frame_values)
+        expected_shift = None
+        effective_max_shift = max_shift
+        if (
+            frame_gap > 1
+            and skip_recovery_mode == "expected-shift"
+            and typical_shift is not None
+            and max_shift is not None
+        ):
+            expected_shift = typical_shift * frame_gap
+            effective_max_shift = max(
+                max_shift,
+                int(round(expected_shift + skip_recovery_tolerance)),
+            )
+
         shift, score = estimate_shift(
             masks[accepted_index],
             masks[candidate_index],
             min_shift,
-            max_shift,
+            effective_max_shift,
+            min_overlap,
         )
         if score < min_score:
             skipped.append(
@@ -682,6 +848,55 @@ def stitch_crops(
                     shift_px=shift,
                     score=score,
                     reason="low alignment score",
+                )
+            )
+            continue
+
+        skipped_frame_recovery = frame_gap > 1
+        shift_is_plausible = True
+        if skipped_frame_recovery:
+            if skip_recovery_mode == "off":
+                skipped.append(
+                    SkippedPair(
+                        previous=paths[accepted_index],
+                        current=paths[candidate_index],
+                        shift_px=shift,
+                        score=score,
+                        reason="skipped-frame recovery disabled",
+                    )
+                )
+                continue
+
+            if skip_recovery_mode == "expected-shift" and expected_shift is not None:
+                shift_is_plausible = abs(shift - expected_shift) <= skip_recovery_tolerance
+            if score < seam_score_bypass or not shift_is_plausible:
+                reason = "low skipped-frame recovery score"
+                if not shift_is_plausible:
+                    reason = "implausible skipped-frame shift"
+                skipped.append(
+                    SkippedPair(
+                        previous=paths[accepted_index],
+                        current=paths[candidate_index],
+                        shift_px=shift,
+                        score=score,
+                        reason=reason,
+                    )
+                )
+                continue
+
+        append_start = append_start_for_shift(
+            previous_width=crops[accepted_index].shape[1],
+            current_width=crops[candidate_index].shape[1],
+            shift=shift,
+        )
+        if append_start is None or append_start >= crops[candidate_index].shape[1]:
+            skipped.append(
+                SkippedPair(
+                    previous=paths[accepted_index],
+                    current=paths[candidate_index],
+                    shift_px=shift,
+                    score=score,
+                    reason="no new right-side content",
                 )
             )
             continue
@@ -706,7 +921,14 @@ def stitch_crops(
                 )
                 can_accept_high_score = (
                     seam_check == "auto"
-                    and candidate_index == accepted_index + 1
+                    and (
+                        candidate_index == accepted_index + 1
+                        or (
+                            skipped_frame_recovery
+                            and skip_recovery_mode != "off"
+                            and shift_is_plausible
+                        )
+                    )
                     and score >= seam_score_bypass
                 )
                 if not can_accept_high_score:
@@ -726,10 +948,10 @@ def stitch_crops(
         max_blend_overlap(
             stitched=stitched,
             current_crop=crops[candidate_index],
-            shift=shift,
+            append_start=append_start,
             blend_width=blend_width,
         )
-        new_strip = crops[candidate_index][:, -shift:]
+        new_strip = crops[candidate_index][:, append_start:]
         stitched = np.concatenate([stitched, new_strip], axis=1)
         if bridge_seams:
             bridge_seam(
@@ -752,9 +974,14 @@ def stitch_crops(
                 seam_connected=connected,
                 seam_horizontal_gap_px=seam_horizontal_gap,
                 seam_vertical_gap_px=seam_vertical_gap,
-                seam_warning=None if connected else seam_reason,
+                seam_warning=stitch_warning(
+                    connected=connected,
+                    seam_reason=seam_reason if not connected else None,
+                    frame_gap=frame_gap,
+                ),
             )
         )
+        shift_per_frame_values.append(shift / frame_gap)
         accepted_index = candidate_index
 
     if not pairs:
@@ -768,19 +995,22 @@ def stitch_images(args: argparse.Namespace) -> StitchResult:
     images = load_images(paths)
     roi = args.roi
     if roi is None:
-        roi = auto_roi(
-            images,
-            feature=args.feature,
-            gray_threshold=args.gray_threshold,
-            static_row_occupancy=args.static_row_occupancy,
-            x_padding=args.x_padding,
-            y_padding_top=(
-                args.y_padding if args.y_padding_top is None else args.y_padding_top
-            ),
-            y_padding_bottom=(
-                args.y_padding if args.y_padding_bottom is None else args.y_padding_bottom
-            ),
-        )
+        if not args.auto_roi:
+            roi = default_roi_for_images(images)
+        if roi is None:
+            roi = auto_roi(
+                images,
+                feature=args.feature,
+                gray_threshold=args.gray_threshold,
+                static_row_occupancy=args.static_row_occupancy,
+                x_padding=args.x_padding,
+                y_padding_top=(
+                    args.y_padding if args.y_padding_top is None else args.y_padding_top
+                ),
+                y_padding_bottom=(
+                    args.y_padding if args.y_padding_bottom is None else args.y_padding_bottom
+                ),
+            )
 
     crops = [crop_image(image, roi) for image in images]
     curve_feature = resolve_curve_feature(
@@ -806,6 +1036,7 @@ def stitch_images(args: argparse.Namespace) -> StitchResult:
         order=args.order,
         min_shift=args.min_shift,
         max_shift=args.max_shift,
+        min_overlap=args.min_overlap,
     )
     if reversed_order:
         output_masks = list(reversed(output_masks))
@@ -825,12 +1056,15 @@ def stitch_images(args: argparse.Namespace) -> StitchResult:
         masks=masks,
         min_shift=args.min_shift,
         max_shift=args.max_shift,
+        min_overlap=args.min_overlap,
         min_score=args.min_score,
         seam_check=args.seam_check,
         seam_window=args.seam_window,
         max_seam_gap=args.max_seam_gap,
         max_seam_y_gap=args.max_seam_y_gap,
         seam_score_bypass=args.seam_score_bypass,
+        skip_recovery_mode=args.skip_recovery_mode,
+        skip_recovery_tolerance=args.skip_recovery_tolerance,
         blend_width=args.blend_width,
         bridge_seams=not args.no_bridge_seams,
         bridge_width=args.bridge_width,
@@ -871,7 +1105,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--roi",
         type=parse_roi,
-        help="Optional x,y,width,height crop. Default: auto-detect from waveform features.",
+        help="Optional x,y,width,height crop. Overrides built-in and auto ROI detection.",
+    )
+    parser.add_argument(
+        "--auto-roi",
+        action="store_true",
+        help="Force curve-based auto ROI instead of the built-in full-screen Vevo ROI.",
     )
     parser.add_argument(
         "--feature",
@@ -886,7 +1125,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Input order handling. Default: auto chooses given or reverse by match score.",
     )
     parser.add_argument("--min-shift", type=int, default=20, help="Minimum shift to search. Default: 20.")
-    parser.add_argument("--max-shift", type=int, default=260, help="Maximum shift to search. Default: 260.")
+    parser.add_argument(
+        "--max-shift",
+        type=int,
+        help=(
+            "Maximum shift to search. Default: auto, using the narrower image "
+            "width minus --min-overlap for each pair."
+        ),
+    )
+    parser.add_argument(
+        "--min-overlap",
+        type=int,
+        default=50,
+        help="Minimum same-width overlap region required when scoring a shift. Default: 50.",
+    )
     parser.add_argument("--min-score", type=float, default=0.30, help="Minimum accepted pair score. Default: 0.30.")
     parser.add_argument(
         "--seam-check",
@@ -919,6 +1171,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "In auto seam mode, accept adjacent pairs above this score even if "
             "the seam endpoint check is inconclusive. Default: 0.95."
+        ),
+    )
+    parser.add_argument(
+        "--skip-recovery-tolerance",
+        type=float,
+        default=25.0,
+        help=(
+            "Allowed shift error when recovering after skipped frames, in pixels. "
+            "Used by --skip-recovery-mode expected-shift. Default: 25."
+        ),
+    )
+    parser.add_argument(
+        "--skip-recovery-mode",
+        choices=["score", "expected-shift", "off"],
+        default="score",
+        help=(
+            "How to recover after skipped frames. score uses only overlap score; "
+            "expected-shift also checks recent shift trend; off disables recovery. "
+            "Default: score."
         ),
     )
     parser.add_argument(
