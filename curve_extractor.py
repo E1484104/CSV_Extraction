@@ -280,19 +280,17 @@ def trace_component(
     for row in rows:
         x_roi = row["x_roi"]
         y_roi = row["y_roi"]
-        x_norm = (x_roi - min_x) / x_range
-        y_norm = (max_y - y_roi) / y_range
+        x_fraction = (x_roi - min_x) / x_range
+        y_fraction = (max_y - y_roi) / y_range
         output_row = {
-            "x_norm": x_norm,
-            "y_norm": y_norm,
             "x_px": x_roi + roi.x,
             "y_px": y_roi + roi.y,
         }
         if calibration is not None:
-            output_row["x_value"] = calibration.x_min + x_norm * (
+            output_row["x_value"] = calibration.x_min + x_fraction * (
                 calibration.x_max - calibration.x_min
             )
-            output_row["y_value"] = calibration.y_min + y_norm * (
+            output_row["y_value"] = calibration.y_min + y_fraction * (
                 calibration.y_max - calibration.y_min
             )
         output_rows.append(output_row)

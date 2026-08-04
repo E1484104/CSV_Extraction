@@ -34,21 +34,23 @@ You can still override those paths from the command line:
 python main.py --input "path\to\image.png" --output "curve.csv"
 ```
 
-The CSV contains normalized coordinates and original image pixel coordinates:
+The CSV contains original image pixel coordinates. It does not normalize each image on
+its own, so multiple CSV files can be normalized together later:
 
 ```csv
-x_norm,y_norm,x_px,y_px
-0,0.527,514,412
-0.001,0.531,515,411
+x_px,y_px
+514,412
+515,411
 ```
 
-`x_norm` runs from left to right. `y_norm` is normalized bottom-to-top, which matches normal plot coordinates.
+Use `normalize_csv_folder.py` when you want shared normalization across a folder of CSV
+files.
 
 ## Line Plot
 
 By default, the line plot is shown in a Matplotlib window and is not saved
 automatically. If calibrated columns are available, the plot uses `x_value` and
-`y_value`; otherwise it uses `x_norm` and `y_norm`.
+`y_value`; otherwise it uses `x_px` and `y_px`.
 
 Automatically save a PNG next to the CSV while still showing the window:
 
@@ -72,6 +74,41 @@ Skip plot generation and keep CSV-only output:
 
 ```powershell
 python main.py --input "image.png" --output "curve.csv" --no-plot
+```
+
+## Batch Normalize CSV Files
+
+`normalize_csv_folder.py` is a standalone helper. It is not connected to `main.py`.
+It reads all CSV files in one folder, maps each CSV's x range to the same time span,
+uses one shared y range across the folder, and writes the same number of normalized CSV
+files to a new folder.
+
+```powershell
+python normalize_csv_folder.py --input "csv" --output "csv_normalized"
+```
+
+Each output CSV preserves the original columns and adds:
+
+```csv
+x_norm,y_norm
+```
+
+By default, each file's `x_px` range is mapped to `x_norm=0..30`, because each stitched
+long image records 30 seconds. The y values are normalized together across all files.
+`y_norm` is inverted so image pixel coordinates become normal plot coordinates, with
+larger values higher on the graph.
+
+Useful options:
+
+```powershell
+python normalize_csv_folder.py --input "csv" --output "csv_normalized" `
+  --x-column x_px --y-column y_px
+
+python normalize_csv_folder.py --input "csv" --output "csv_normalized" `
+  --duration-s 30
+
+python normalize_csv_folder.py --input "csv" --output "csv_normalized" `
+  --recursive
 ```
 
 ## WAV Doppler Envelope
@@ -242,7 +279,7 @@ python main.py --input "image.png" --output "curve.csv" `
   --x-min 4.2 --x-max 14.4 --y-min -1355 --y-max 581
 ```
 
-The CSV will include `x_value` and `y_value` columns in addition to normalized and pixel coordinates.
+The CSV will include `x_value` and `y_value` columns in addition to pixel coordinates.
 
 ## Batch Processing
 

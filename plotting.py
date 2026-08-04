@@ -14,7 +14,9 @@ PLOT_DPI = 100
 def _point_columns(rows: list[dict[str, float]]) -> tuple[str, str]:
     if rows and "x_value" in rows[0] and "y_value" in rows[0]:
         return "x_value", "y_value"
-    return "x_norm", "y_norm"
+    if rows and "x_norm" in rows[0] and "y_norm" in rows[0]:
+        return "x_norm", "y_norm"
+    return "x_px", "y_px"
 
 
 def _finite_points(
@@ -72,6 +74,8 @@ def write_line_plot(plot_path: Path | None, rows: list[dict[str, float]]) -> Non
         axis.set_ylabel(y_key)
         axis.set_xlim(x_min, x_max)
         axis.set_ylim(y_min, y_max)
+        if y_key == "y_px":
+            axis.invert_yaxis()
         axis.xaxis.set_major_locator(MaxNLocator(nbins=6))
         axis.yaxis.set_major_locator(MaxNLocator(nbins=6))
         axis.grid(True, color="#dfe4ea", linewidth=0.8)

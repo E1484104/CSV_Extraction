@@ -38,7 +38,7 @@ def plot_path_for(
 
 def write_csv(csv_path: Path, rows: list[dict[str, float]]) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["x_norm", "y_norm", "x_px", "y_px"]
+    fieldnames = ["x_px", "y_px"]
     if rows and "x_value" in rows[0]:
         fieldnames.extend(["x_value", "y_value"])
 
