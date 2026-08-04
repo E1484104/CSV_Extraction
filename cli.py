@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from config import DEBUG_IMAGE_PATH, INPUT_PATH, OUTPUT_PATH
+from config import DEBUG_IMAGE_PATH, ROOT_PATH, raw_data_path, stitched_images_path
 from parsing import parse_color
 
 
@@ -15,18 +15,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--root",
+        type=Path,
+        default=ROOT_PATH,
+        help=(
+            "Experiment root folder. Used only for omitted --input/--output. "
+            f"Default: {ROOT_PATH}"
+        ),
+    )
+    parser.add_argument(
         "--input",
         type=Path,
-        default=INPUT_PATH,
-        help=f"Image file or directory. Default: {INPUT_PATH}",
+        help=f"Image/WAV file or directory. Default: ROOT/{stitched_images_path().name}",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=OUTPUT_PATH,
         help=(
-            "CSV path for one image, or output directory for an input directory. "
-            f"Default: {OUTPUT_PATH}"
+            "CSV path for one input file, or output directory for an input directory. "
+            f"Default: ROOT/{raw_data_path().name}"
         ),
     )
     parser.add_argument(

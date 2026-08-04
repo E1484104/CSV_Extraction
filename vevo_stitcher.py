@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+from config import ROOT_PATH, raw_images_path, stitched_images_path
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
@@ -990,8 +993,115 @@ def stitch_crops(
     return stitched, pairs, skipped
 
 
-def stitch_images(args: argparse.Namespace) -> StitchResult:
-    paths = image_paths_from_inputs(args.input)
+def directory_image_paths(directory: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+    )
+
+
+def child_image_directories(directory: Path) -> list[Path]:
+    return sorted(
+        child
+        for child in directory.iterdir()
+        if child.is_dir() and len(directory_image_paths(child)) >= 2
+    )
+
+
+def series_number(path: Path) -> str | None:
+    match = re.search(r"(?:series[_-]?)(\d+)$", path.name, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return None
+
+
+def experiment_output_stem_for_directory(directory: Path) -> str | None:
+    number = series_number(directory)
+    if number is None:
+        return None
+    if directory.parent.name.lower() != "raw_images":
+        return None
+    experiment_name = directory.parent.parent.name
+    if not experiment_name:
+        return None
+    return f"{experiment_name}-{number}"
+
+
+def output_name_for_inputs(inputs: list[Path]) -> str:
+    if len(inputs) == 1 and inputs[0].is_dir():
+        experiment_stem = experiment_output_stem_for_directory(inputs[0])
+        if experiment_stem is not None:
+            return f"{experiment_stem}.png"
+        return f"{inputs[0].name}.png"
+    if inputs:
+        first_parent = inputs[0].parent
+        if all(path.parent == first_parent for path in inputs):
+            experiment_stem = experiment_output_stem_for_directory(first_parent)
+            if experiment_stem is not None:
+                return f"{experiment_stem}.png"
+        return f"{inputs[0].parent.name or 'stitched_waveform'}.png"
+    return "stitched_waveform.png"
+
+
+def output_path_for_stitch(inputs: list[Path], output: Path, batch: bool) -> Path:
+    if batch:
+        if output.suffix:
+            raise RuntimeError("Output must be a directory when stitching multiple groups")
+        return output / output_name_for_inputs(inputs)
+
+    if output.suffix:
+        return output
+    return output / output_name_for_inputs(inputs)
+
+
+def stitch_jobs(args: argparse.Namespace) -> list[tuple[list[Path], Path]]:
+    missing = [path for path in args.input if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Input path does not exist: {missing[0]}")
+
+    files = [path for path in args.input if path.is_file()]
+    directories = [path for path in args.input if path.is_dir()]
+    if files and directories:
+        raise RuntimeError("Do not mix image files and directories in one stitch command")
+
+    if files:
+        output_path = output_path_for_stitch(files, args.output, batch=False)
+        return [(files, output_path)]
+
+    if len(directories) == 1:
+        directory = directories[0]
+        if len(directory_image_paths(directory)) >= 2:
+            output_path = output_path_for_stitch([directory], args.output, batch=False)
+            return [([directory], output_path)]
+
+        child_directories = child_image_directories(directory)
+        if not child_directories:
+            raise RuntimeError(f"No stitchable image groups found in {directory}")
+        return [
+            ([child], output_path_for_stitch([child], args.output, batch=True))
+            for child in child_directories
+        ]
+
+    if directories:
+        jobs: list[tuple[list[Path], Path]] = []
+        for directory in directories:
+            if len(directory_image_paths(directory)) < 2:
+                raise RuntimeError(f"Directory has fewer than two supported images: {directory}")
+            jobs.append(
+                ([directory], output_path_for_stitch([directory], args.output, batch=True))
+            )
+        return jobs
+
+    raise RuntimeError("No input images or directories were provided")
+
+
+def stitch_image_group(
+    inputs: list[Path],
+    output_path: Path,
+    args: argparse.Namespace,
+) -> StitchResult:
+    paths = image_paths_from_inputs(inputs)
     images = load_images(paths)
     roi = args.roi
     if roi is None:
@@ -1066,16 +1176,16 @@ def stitch_images(args: argparse.Namespace) -> StitchResult:
         skip_recovery_mode=args.skip_recovery_mode,
         skip_recovery_tolerance=args.skip_recovery_tolerance,
         blend_width=args.blend_width,
-        bridge_seams=not args.no_bridge_seams,
+        bridge_seams=args.bridge_seams,
         bridge_width=args.bridge_width,
     )
     if args.draw_axis and not args.keep_static:
         draw_horizontal_axis(stitched, axis_y, background=args.background)
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(stitched).save(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(stitched).save(output_path)
     return StitchResult(
-        output_path=args.output,
+        output_path=output_path,
         image_paths=paths,
         roi=roi,
         pairs=pairs,
@@ -1085,22 +1195,52 @@ def stitch_images(args: argparse.Namespace) -> StitchResult:
     )
 
 
+def stitch_images(args: argparse.Namespace) -> StitchResult:
+    jobs = stitch_jobs(args)
+    if len(jobs) != 1:
+        raise RuntimeError("stitch_images expected exactly one stitch job")
+    inputs, output_path = jobs[0]
+    return stitch_image_group(inputs=inputs, output_path=output_path, args=args)
+
+
+def stitch_all(args: argparse.Namespace) -> list[StitchResult]:
+    return [
+        stitch_image_group(inputs=inputs, output_path=output_path, args=args)
+        for inputs, output_path in stitch_jobs(args)
+    ]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Stitch Vevo rolling-window waveform PNG exports into one long image.",
     )
     parser.add_argument(
+        "--root",
+        type=Path,
+        default=ROOT_PATH,
+        help=(
+            "Experiment root folder. Used only for omitted --input/--output. "
+            f"Default: {ROOT_PATH}"
+        ),
+    )
+    parser.add_argument(
         "--input",
         nargs="+",
         type=Path,
-        required=True,
-        help="Input image files, or one directory containing image files.",
+        help=(
+            "Input image files, one directory containing image files, multiple "
+            "directories, or one parent directory containing stitchable subdirectories. "
+            f"Default: ROOT/{raw_images_path().name}"
+        ),
     )
     parser.add_argument(
         "--output",
         type=Path,
-        required=True,
-        help="Output stitched PNG path.",
+        help=(
+            "Output PNG path for one stitch group, or output directory for multiple "
+            "stitch groups. For one group, a directory output writes <input-name>.png. "
+            f"Default: ROOT/{stitched_images_path().name}"
+        ),
     )
     parser.add_argument(
         "--roi",
@@ -1199,9 +1339,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Columns of overlap to max-blend before appending each new strip. Default: 8.",
     )
     parser.add_argument(
-        "--no-bridge-seams",
+        "--bridge-seams",
+        dest="bridge_seams",
         action="store_true",
-        help="Disable drawing a short bridge between detected curve endpoints at each seam.",
+        default=False,
+        help="Draw a short bridge between detected curve endpoints at each seam. Default: off.",
+    )
+    parser.add_argument(
+        "--no-bridge-seams",
+        dest="bridge_seams",
+        action="store_false",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--bridge-width",
@@ -1290,12 +1438,19 @@ def print_result(result: StitchResult) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.input is None:
+        args.input = [raw_images_path(args.root)]
+    if args.output is None:
+        args.output = stitched_images_path(args.root)
     try:
-        result = stitch_images(args)
+        results = stitch_all(args)
     except Exception as exc:
         print(f"error: {exc}")
         return 1
-    print_result(result)
+    for index, result in enumerate(results):
+        if index:
+            print()
+        print_result(result)
     return 0
 
 

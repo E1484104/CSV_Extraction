@@ -12,27 +12,57 @@ python -m pip install -r requirements.txt
 
 ## Basic Usage
 
-Edit the paths near the top of `config.py`:
+For each experiment, either edit `ROOT_PATH` near the top of `config.py`:
 
 ```python
-INPUT_PATH = Path(r"input.png")
-OUTPUT_PATH = Path(r"curve.csv")
+ROOT_PATH = Path(r"../TesterX")
 ```
 
-Then run:
+Or pass the root folder from the command line:
 
 ```powershell
-python main.py
+python vevo_stitcher.py --root "../TesterX"
+python main.py --root "../TesterX" --no-plot
+python normalizer.py --root "../TesterX"
 ```
 
-After each CSV is written, the script opens a Matplotlib plot window. Use the window
-toolbar to save the plot manually, or close the window without saving.
+The default workflow expects this folder layout:
 
-You can still override those paths from the command line:
+```text
+TesterX/
+  Raw_Images/
+    series_1/
+    series_2/
+    series_3/
+  Stitched_Images/
+  raw_data/
+  norm_data/
+```
+
+Then run the three stages:
+
+```powershell
+python vevo_stitcher.py
+
+python main.py --no-plot
+
+python normalizer.py
+```
+
+By default, `vevo_stitcher.py` reads `TesterX/Raw_Images/series_*` and writes
+`TesterX/Stitched_Images/TesterX-1.png`, `TesterX-2.png`, and so on. `main.py` reads
+`TesterX/Stitched_Images` and writes CSV files to `TesterX/raw_data`. `normalizer.py`
+reads `TesterX/raw_data` and writes normalized CSV files to `TesterX/norm_data`.
+
+You can still override `--input` and `--output` from the command line. Explicit
+`--input` and `--output` values take priority over `--root`:
 
 ```powershell
 python main.py --input "path\to\image.png" --output "curve.csv"
 ```
+
+After each CSV is written, the script opens a Matplotlib plot window. Use the window
+toolbar to save the plot manually, or close the window without saving.
 
 The CSV contains original image pixel coordinates. It does not normalize each image on
 its own, so multiple CSV files can be normalized together later:
@@ -43,8 +73,7 @@ x_px,y_px
 515,411
 ```
 
-Use `normalize_csv_folder.py` when you want shared normalization across a folder of CSV
-files.
+Use `normalizer.py` when you want shared normalization across CSV files.
 
 ## Line Plot
 
@@ -78,13 +107,17 @@ python main.py --input "image.png" --output "curve.csv" --no-plot
 
 ## Batch Normalize CSV Files
 
-`normalize_csv_folder.py` is a standalone helper. It is not connected to `main.py`.
-It reads all CSV files in one folder, maps each CSV's x range to the same time span,
-uses one shared y range across the folder, and writes the same number of normalized CSV
-files to a new folder.
+`normalizer.py` is a standalone helper. It is not connected to `main.py`.
+It accepts either one CSV file or a folder of CSV files. It maps each CSV's x range to
+the same time span, uses one shared y range across the selected CSV files, and writes
+one normalized CSV for each input CSV.
 
 ```powershell
-python normalize_csv_folder.py --input "csv" --output "csv_normalized"
+python normalizer.py
+
+python normalizer.py --input "curve.csv" --output "curve_normalized.csv"
+
+python normalizer.py --input "csv" --output "csv_normalized"
 ```
 
 Each output CSV preserves the original columns and adds:
@@ -101,13 +134,13 @@ larger values higher on the graph.
 Useful options:
 
 ```powershell
-python normalize_csv_folder.py --input "csv" --output "csv_normalized" `
+python normalizer.py --input "csv" --output "csv_normalized" `
   --x-column x_px --y-column y_px
 
-python normalize_csv_folder.py --input "csv" --output "csv_normalized" `
+python normalizer.py --input "csv" --output "csv_normalized" `
   --duration-s 30
 
-python normalize_csv_folder.py --input "csv" --output "csv_normalized" `
+python normalizer.py --input "csv" --output "csv_normalized" `
   --recursive
 ```
 
@@ -122,6 +155,12 @@ isolated high-frequency noise near Nyquist as the envelope.
 
 ```powershell
 python main.py --input "Wave.wav" --output "Wave.csv"
+```
+
+For a folder of WAV files, use an output directory:
+
+```powershell
+python main.py --input "wav_files" --output "wav_csv" --no-plot
 ```
 
 The WAV CSV uses long format so channels are kept separate before their physical
@@ -158,7 +197,18 @@ python main.py --input "Wave.wav" --output "Wave.csv" `
 exports. It is not connected to `main.py` yet.
 
 ```powershell
+python vevo_stitcher.py
+
 python vevo_stitcher.py --input "frames" --output "stitched_waveform.png"
+```
+
+For batch stitching, pass multiple frame folders or a parent folder whose children are
+frame folders. In that mode `--output` must be a directory:
+
+```powershell
+python vevo_stitcher.py --input "run_01" "run_02" --output "stitched"
+
+python vevo_stitcher.py --input "all_runs" --output "stitched"
 ```
 
 For files listed in reverse time order, the default `--order auto` can usually detect
@@ -203,18 +253,23 @@ python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
   --auto-roi --y-padding-bottom 430 --draw-axis
 ```
 
-Seam checking is enabled automatically for blue/green traces. The main alignment still
-comes from the whole overlapping waveform region. If an adjacent pair has a very high
-overlap score, the stitcher accepts it even when the exact seam endpoint is missing and
-prints a `seam warning`. If one or more frames are skipped, the default recovery mode
-accepts a later frame by overlap score only; it does not assume a fixed `102/103px`
-step. Use `--skip-recovery-mode expected-shift` if you want the stricter raw-frame
-behavior that also checks recent shift trends. Use `--seam-check on` if you want the
-seam endpoint test to be strict. Disable seam checking if you want every frame appended:
+Seam checking defaults to `auto`, and seam bridging is disabled by default. The main
+alignment still comes from the whole overlapping waveform region. If one or more frames
+are skipped, the default recovery mode accepts a later frame by overlap score only; it
+does not assume a fixed `102/103px` step. Use `--seam-check on` if you want the seam
+endpoint test to be strict, or `--seam-check off` if you want to disable seam checking.
+Use `--bridge-seams` only when you want the program to draw short connecting lines at
+seams:
 
 ```powershell
 python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --seam-check on
+
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
   --seam-check off
+
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --bridge-seams
 ```
 
 If valid adjacent seams are still being skipped, relax the seam tolerances or lower the
@@ -287,7 +342,9 @@ The CSV will include `x_value` and `y_value` columns in addition to pixel coordi
 python main.py --input "images" --output "csv"
 ```
 
-Each supported image in the input directory is written to a same-stem CSV in the output directory.
+Each supported image in the input directory is written to a same-stem CSV in the output
+directory. For input directories, `--output` must be a directory. `main.py` also
+accepts a folder of WAV files and writes one same-stem CSV per WAV.
 
 ## Debug Overlay
 

@@ -39,6 +39,15 @@ def process_image(
 
 
 def process_images(args: argparse.Namespace) -> list[ProcessedImage]:
+    if args.input.is_dir() and args.output.suffix.lower() == ".csv":
+        raise RuntimeError("Output must be a directory when image input is a directory")
+    if (
+        args.input.is_dir()
+        and getattr(args, "plot_output", None) is not None
+        and args.plot_output.suffix
+    ):
+        raise RuntimeError("Plot output must be a directory when image input is a directory")
+
     inputs = image_inputs(args.input)
     if not inputs:
         raise RuntimeError(f"No supported images found in {args.input}")

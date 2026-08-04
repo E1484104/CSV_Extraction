@@ -6,8 +6,11 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from config import ROOT_PATH, norm_data_path, raw_data_path
+
 
 DEFAULT_OUTPUT_DIRNAME = "normalized"
+DEFAULT_SINGLE_SUFFIX = "_normalized"
 
 
 @dataclass(frozen=True)
@@ -27,14 +30,19 @@ class NormalizationStats:
     point_count: int
 
 
-def csv_paths(input_dir: Path, pattern: str, recursive: bool) -> list[Path]:
-    if not input_dir.is_dir():
-        raise NotADirectoryError(f"Input is not a directory: {input_dir}")
+def csv_paths(input_path: Path, pattern: str, recursive: bool) -> list[Path]:
+    if input_path.is_file():
+        if input_path.suffix.lower() != ".csv":
+            raise RuntimeError(f"Input file is not a CSV: {input_path}")
+        return [input_path]
 
-    iterator = input_dir.rglob(pattern) if recursive else input_dir.glob(pattern)
+    if not input_path.is_dir():
+        raise FileNotFoundError(f"Input path does not exist: {input_path}")
+
+    iterator = input_path.rglob(pattern) if recursive else input_path.glob(pattern)
     paths = sorted(path for path in iterator if path.is_file())
     if not paths:
-        raise RuntimeError(f"No CSV files found in {input_dir}")
+        raise RuntimeError(f"No CSV files found in {input_path}")
     return paths
 
 
@@ -174,11 +182,27 @@ def output_fieldnames(fieldnames: list[str]) -> list[str]:
     return result
 
 
-def output_path_for(input_path: Path, input_dir: Path, output_dir: Path, recursive: bool) -> Path:
+def default_output_for(input_path: Path) -> Path:
+    if input_path.is_file():
+        return input_path.with_name(f"{input_path.stem}{DEFAULT_SINGLE_SUFFIX}.csv")
+    return input_path / DEFAULT_OUTPUT_DIRNAME
+
+
+def output_path_for(
+    input_path: Path,
+    input_root: Path,
+    output: Path,
+    recursive: bool,
+) -> Path:
+    if input_root.is_file():
+        if output.suffix.lower() == ".csv":
+            return output
+        return output / input_path.name
+
     if recursive:
-        relative = input_path.relative_to(input_dir)
-        return output_dir / relative
-    return output_dir / input_path.name
+        relative = input_path.relative_to(input_root)
+        return output / relative
+    return output / input_path.name
 
 
 def write_normalized_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
@@ -190,14 +214,16 @@ def write_normalized_csv(path: Path, fieldnames: list[str], rows: list[dict[str,
 
 
 def normalize_folder(args: argparse.Namespace) -> tuple[NormalizationStats, int]:
-    input_dir = args.input
-    output_dir = args.output or input_dir / DEFAULT_OUTPUT_DIRNAME
-    if output_dir.resolve() == input_dir.resolve():
-        raise RuntimeError("Output directory must be different from the input directory")
+    input_path = args.input
+    output = args.output or default_output_for(input_path)
+    if output.resolve() == input_path.resolve():
+        raise RuntimeError("Output must be different from the input path")
+    if input_path.is_dir() and output.suffix.lower() == ".csv":
+        raise RuntimeError("Output must be a directory when the input is a directory")
     if args.duration_s <= 0:
         raise RuntimeError("--duration-s must be greater than 0")
 
-    paths = csv_paths(input_dir, pattern=args.pattern, recursive=args.recursive)
+    paths = csv_paths(input_path, pattern=args.pattern, recursive=args.recursive)
     data = [read_csv(path) for path in paths]
     x_column = choose_column(data, args.x_column, ["x_px", "x_value"])
     y_column = choose_column(data, args.y_column, ["y_px", "y_value"])
@@ -211,8 +237,8 @@ def normalize_folder(args: argparse.Namespace) -> tuple[NormalizationStats, int]
     for item in data:
         destination = output_path_for(
             input_path=item.path,
-            input_dir=input_dir,
-            output_dir=output_dir,
+            input_root=input_path,
+            output=output,
             recursive=args.recursive,
         )
         rows = normalized_rows(item, stats=stats, invert_y=not args.no_invert_y)
@@ -228,20 +254,31 @@ def normalize_folder(args: argparse.Namespace) -> tuple[NormalizationStats, int]
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Normalize CSV files in a folder with per-file x mapped to a fixed "
+            "Normalize one CSV file or a CSV folder with per-file x mapped to a fixed "
             "duration and y normalized by one shared range."
+        ),
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=ROOT_PATH,
+        help=(
+            "Experiment root folder. Used only for omitted --input/--output. "
+            f"Default: {ROOT_PATH}"
         ),
     )
     parser.add_argument(
         "--input",
         type=Path,
-        required=True,
-        help="Folder containing CSV files to normalize.",
+        help=f"CSV file or folder containing CSV files to normalize. Default: ROOT/{raw_data_path().name}.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        help=f"Output folder. Default: input folder/{DEFAULT_OUTPUT_DIRNAME}.",
+        help=(
+            "Output CSV path for one input CSV, or output folder for an input folder. "
+            f"Default: ROOT/{norm_data_path().name}."
+        ),
     )
     parser.add_argument(
         "--pattern",
@@ -278,15 +315,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.input is None:
+        args.input = raw_data_path(args.root)
+    if args.output is None:
+        args.output = norm_data_path(args.root)
     try:
         stats, file_count = normalize_folder(args)
     except Exception as exc:
         print(f"error: {exc}")
         return 1
 
-    output_dir = args.output or args.input / DEFAULT_OUTPUT_DIRNAME
+    output = args.output or default_output_for(args.input)
     print(
-        f"{file_count} CSV files -> {output_dir} | "
+        f"{file_count} CSV files -> {output} | "
         f"x {stats.x_column} per file -> [0, {stats.duration_s:.8g}] | "
         f"y {stats.y_column} [{stats.y_min:.8g}, {stats.y_max:.8g}] | "
         f"{stats.point_count} points"

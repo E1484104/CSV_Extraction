@@ -13,6 +13,7 @@ from plotting import write_wav_envelope_plot
 
 
 CsvValue = float | str | None
+WAV_SUFFIXES = {".wav"}
 
 
 @dataclass(frozen=True)
@@ -27,18 +28,39 @@ class WavEnvelopeResult:
     rows: list[dict[str, CsvValue]]
 
 
-def wav_csv_path_for(wav_path: Path, output: Path) -> Path:
-    if output.suffix.lower() == ".csv":
+def wav_inputs(input_path: Path) -> list[Path]:
+    if input_path.is_file():
+        if input_path.suffix.lower() != ".wav":
+            return []
+        return [input_path]
+    if input_path.is_dir():
+        return sorted(
+            path for path in input_path.iterdir() if path.suffix.lower() in WAV_SUFFIXES
+        )
+    raise FileNotFoundError(f"Input path does not exist: {input_path}")
+
+
+def wav_csv_path_for(wav_path: Path, input_root: Path, output: Path) -> Path:
+    if input_root.is_file() and output.suffix.lower() == ".csv":
         return output
-    return output / "continuous_envelope.csv"
+    if input_root.is_file():
+        return output / "continuous_envelope.csv"
+    return output / f"{wav_path.stem}.csv"
 
 
-def wav_plot_path_for(wav_path: Path, csv_path: Path, plot_output: Path | None) -> Path:
+def wav_plot_path_for(
+    wav_path: Path,
+    input_root: Path,
+    csv_path: Path,
+    plot_output: Path | None,
+) -> Path:
     if plot_output is None:
         return csv_path.with_suffix(".png")
-    if plot_output.suffix:
+    if input_root.is_file() and plot_output.suffix:
         return plot_output
-    return plot_output / "continuous_envelope.png"
+    if input_root.is_file():
+        return plot_output / "continuous_envelope.png"
+    return plot_output / f"{wav_path.stem}.png"
 
 
 def read_pcm16_wav(wav_path: Path) -> tuple[int, np.ndarray]:
@@ -550,13 +572,17 @@ def write_wav_envelope_csv(
             writer.writerow({field: _csv_value(row.get(field)) for field in fieldnames})
 
 
-def process_wav(args: argparse.Namespace) -> WavEnvelopeResult:
-    wav_path = Path(args.input)
+def process_wav_file(
+    wav_path: Path,
+    input_root: Path,
+    output: Path,
+    args: argparse.Namespace,
+) -> WavEnvelopeResult:
     if not wav_path.is_file():
         raise FileNotFoundError(f"WAV input path does not exist: {wav_path}")
 
     validate_wav_args(args)
-    csv_path = wav_csv_path_for(wav_path, args.output)
+    csv_path = wav_csv_path_for(wav_path, input_root=input_root, output=output)
     sample_rate, channels, frames, duration_s, rows = extract_wav_envelope_rows(wav_path, args)
     write_wav_envelope_csv(csv_path, rows)
 
@@ -565,6 +591,7 @@ def process_wav(args: argparse.Namespace) -> WavEnvelopeResult:
         if getattr(args, "save_plot", False) or getattr(args, "plot_output", None) is not None:
             plot_path = wav_plot_path_for(
                 wav_path=wav_path,
+                input_root=input_root,
                 csv_path=csv_path,
                 plot_output=getattr(args, "plot_output", None),
             )
@@ -591,6 +618,40 @@ def process_wav(args: argparse.Namespace) -> WavEnvelopeResult:
         duration_s=duration_s,
         rows=rows,
     )
+
+
+def process_wav(args: argparse.Namespace) -> WavEnvelopeResult:
+    return process_wav_file(
+        wav_path=Path(args.input),
+        input_root=Path(args.input),
+        output=args.output,
+        args=args,
+    )
+
+
+def process_wavs(args: argparse.Namespace) -> list[WavEnvelopeResult]:
+    if args.input.is_dir() and args.output.suffix.lower() == ".csv":
+        raise RuntimeError("Output must be a directory when WAV input is a directory")
+    if (
+        args.input.is_dir()
+        and getattr(args, "plot_output", None) is not None
+        and args.plot_output.suffix
+    ):
+        raise RuntimeError("Plot output must be a directory when WAV input is a directory")
+
+    inputs = wav_inputs(args.input)
+    if not inputs:
+        raise RuntimeError(f"No supported WAV files found in {args.input}")
+
+    return [
+        process_wav_file(
+            wav_path=wav_path,
+            input_root=args.input,
+            output=args.output,
+            args=args,
+        )
+        for wav_path in inputs
+    ]
 
 
 def format_wav_envelope_result(result: WavEnvelopeResult) -> str:

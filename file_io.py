@@ -9,6 +9,8 @@ from models import ProcessedImage
 
 def image_inputs(input_path: Path) -> list[Path]:
     if input_path.is_file():
+        if input_path.suffix.lower() not in IMAGE_SUFFIXES:
+            return []
         return [input_path]
     if input_path.is_dir():
         return sorted(
@@ -19,7 +21,9 @@ def image_inputs(input_path: Path) -> list[Path]:
 
 def output_path_for(input_image: Path, input_root: Path, output: Path) -> Path:
     if input_root.is_file():
-        return output
+        if output.suffix.lower() == ".csv":
+            return output
+        return output / f"{input_image.stem}.csv"
     return output / f"{input_image.stem}.csv"
 
 
