@@ -1,0 +1,172 @@
+﻿项目命令行参数速查
+====================
+
+通用说明
+--------
+- 三个入口：main.py、vevo_stitcher.py、normalizer.py。
+- --root 用于指定一次实验的根目录；只有没有手动输入 --input 或 --output 时才会生效。
+- 如果同时输入 --root 和 --input/--output，显式输入的 --input/--output 优先。
+
+默认实验目录结构：
+ROOT_PATH/
+  Raw_Images/
+    series_1/
+    series_2/
+  Stitched_Images/
+  raw_data/
+  norm_data/
+
+
+1. vevo_stitcher.py：图片拼接
+-----------------------------
+用途：把 Raw_Images/series_* 中的连续小图拼接成长波形图。
+
+常用命令：
+python vevo_stitcher.py --root "../Tester1"
+
+默认路径：
+- 输入：ROOT_PATH/Raw_Images
+- 输出：ROOT_PATH/Stitched_Images
+
+路径参数：
+- --root：实验根目录。
+- --input：输入图片文件、图片文件夹、多个 series 文件夹，或包含多个 series 子文件夹的父目录。
+- --output：输出 PNG 文件路径，或批量拼接时的输出文件夹。
+
+ROI 与曲线识别：
+- --roi：手动指定裁剪区域，格式为 x,y,width,height。
+- --auto-roi：强制使用自动 ROI，而不是内置 Vevo 全屏 ROI。
+- --feature：选择用于匹配的曲线颜色，可选 auto、blue、green；默认 auto。
+- --keep-static：保留原图中的非曲线静态内容。
+- --draw-axis：在输出图中画一条连续横轴。
+- --background：清理静态内容后的背景灰度值，默认 0。
+
+图片顺序与匹配：
+- --order：输入顺序，可选 auto、given、reverse；默认 auto。
+- --min-shift：搜索的最小水平位移，默认 20。
+- --max-shift：搜索的最大水平位移；默认自动取较窄图片宽度减去 min-overlap。
+- --min-overlap：匹配时要求的最小重叠宽度，默认 50。
+- --min-score：接受拼接对的最低匹配分数，默认 0.30。
+- --blend-width：拼接处做最大值融合的宽度，默认 8。
+
+seam 检查与跳帧恢复：
+- --seam-check：接缝检查模式，可选 auto、on、off；默认 auto。
+- --seam-window：接缝左右各搜索多少列，默认 16。
+- --max-seam-gap：接缝允许的最大水平断点距离，默认 8。
+- --max-seam-y-gap：接缝允许的最大垂直断点距离，默认 20。
+- --seam-score-bypass：auto seam 模式下，高于该分数可绕过不确定接缝检查，默认 0.95。
+- --skip-recovery-mode：跳帧后的恢复方式，可选 score、expected-shift、off；默认 score。
+- --skip-recovery-tolerance：expected-shift 模式下允许的 shift 误差，默认 25。
+- --bridge-seams：在接缝处画短连接线；默认关闭。
+- --bridge-width：bridge 线宽，默认 3。
+
+自动 ROI 辅助参数：
+- --x-padding：自动 ROI 左右扩展像素，默认 0。
+- --y-padding：自动 ROI 上下扩展像素，默认 70。
+- --y-padding-top：自动 ROI 顶部扩展像素，覆盖 y-padding 的顶部值。
+- --y-padding-bottom：自动 ROI 底部扩展像素，覆盖 y-padding 的底部值。
+- --static-row-occupancy：超过该占比的行视为静态横线并忽略，默认 0.35。
+
+
+2. main.py：图片/WAV 提取 CSV
+-----------------------------
+用途：从拼接后的图片提取曲线 CSV；也可从 WAV 提取多普勒频谱外缘 CSV。
+
+常用命令：
+python main.py --root "../Tester1" --no-plot
+
+默认路径：
+- 输入：ROOT_PATH/Stitched_Images
+- 输出：ROOT_PATH/raw_data
+
+路径与绘图：
+- --root：实验根目录。
+- --input：输入图片、WAV、图片文件夹或 WAV 文件夹。
+- --output：输出 CSV 文件路径，或批量处理时的输出文件夹。
+- --plot-output：保存绘图 PNG 的路径或文件夹；设置后会自动保存图。
+- --save-plot：自动保存图，同时仍显示 Matplotlib 窗口。
+- --no-plot：不显示也不保存图，只生成 CSV。
+- --debug-image：输出调试图，显示 ROI、选中曲线和检测点。
+
+图片曲线识别：
+- --target-color：手动指定目标曲线颜色，格式 #RRGGBB 或 R,G,B。
+- --tolerance：颜色距离容差，越大越容易包含抗锯齿边缘，也更容易包含噪声；默认 55。
+- --roi：手动指定图片裁剪区域，格式 x,y,width,height；也支持 0-1 的归一化比例。
+- --sample-step：每隔多少水平像素输出一个点，默认 1。
+- --smooth-window：输出 y 值的中值平滑窗口，1 表示不平滑；默认 1。
+- --min-area：候选连通区域的最小面积，默认 30。
+- --min-span-ratio：候选区域相对 ROI 宽度的最小横向跨度偏好，默认 0.15。
+- --min-neighbors：去除邻居数少于该值的孤立彩色像素，默认 1。
+- --allow-flat：允许近似水平的组件被自动选中。
+- --min-brightness：自动选色时的最低亮度，默认 45。
+- --min-saturation：自动选色时的最低饱和度，默认 35。
+- --auto-candidates：自动选色时尝试的候选颜色数量，默认 8。
+
+真实坐标标定：
+- --x-min：真实 x 轴最小值。
+- --x-max：真实 x 轴最大值。
+- --y-min：真实 y 轴最小值。
+- --y-max：真实 y 轴最大值。
+
+WAV 频谱外缘提取：
+- --wav-stft-window：STFT 窗口长度，默认 2048。
+- --wav-stft-hop：STFT hop 长度，默认 256。
+- --wav-min-frequency：WAV 分析最低频率，默认 100 Hz。
+- --wav-max-frequency：WAV 分析最高频率，默认 8000 Hz。
+- --wav-noise-percentile：按频率估计噪声底的百分位，默认 20。
+- --wav-threshold-db：有效频谱需高于白化噪声底的 dB 阈值，默认 8。
+- --wav-rolloff-percentile：谱滚降百分位，用于估计频谱外缘，默认 95。
+- --wav-min-consecutive-bins：有效频带至少连续的频率 bin 数，默认 3。
+- --wav-min-run-energy-fraction：保留有效频带所需的相对能量比例，默认 0.05。
+- --wav-median-window：WAV 结果中值滤波窗口，默认 7。
+- --wav-smooth-window：WAV 结果轻微平滑窗口，默认 3。
+- --wav-fill-gaps：最多插值填补多少个连续空窗，默认 2。
+- --wav-max-jump-hz：允许的一帧最大频率跳变；不填则自动，设为 0 可关闭跳变剔除。
+- --wav-min-confidence：接受 WAV 检测点的最低置信度，默认 0.05。
+- --wav-plot-start：WAV 图显示起始时间，默认 0 秒。
+- --wav-plot-duration：WAV 图显示时长，默认 1.1 秒。
+
+
+3. normalizer.py：CSV 统一归一化
+-------------------------------
+用途：读取 raw_data 中的 CSV，生成 norm_data 中的归一化 CSV。
+
+常用命令：
+python normalizer.py --root "../Tester1"
+
+默认路径：
+- 输入：ROOT_PATH/raw_data
+- 输出：ROOT_PATH/norm_data
+
+路径与文件选择：
+- --root：实验根目录。
+- --input：输入单个 CSV 或 CSV 文件夹。
+- --output：输出单个 CSV 路径，或输出文件夹。
+- --pattern：文件夹模式下匹配的 CSV 文件名模式，默认 *.csv。
+- --recursive：递归搜索子文件夹，并在输出中保留相对路径。
+
+归一化设置：
+- --x-column：指定用于横轴的列；默认优先 x_px，其次 x_value。
+- --y-column：指定用于纵轴的列；默认优先 y_px，其次 y_value。
+- --duration-s：把每个 CSV 自己的横轴范围映射到 0..duration_s，默认 30 秒。
+- --no-invert-y：不反转 y 轴；默认会把图像像素 y 轴转换成正常图表方向。
+
+
+推荐调参顺序
+------------
+1. 拼接有问题时，先调 vevo_stitcher.py：
+   - --seam-check off
+   - --max-seam-gap
+   - --seam-score-bypass
+   - --feature blue/green
+
+2. 曲线提取有问题时，先调 main.py：
+   - --roi
+   - --target-color
+   - --tolerance
+   - --min-area
+
+3. 归一化只在比较多份 CSV 时使用 normalizer.py：
+   - --duration-s
+   - --x-column
+   - --y-column
