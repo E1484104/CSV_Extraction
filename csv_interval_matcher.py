@@ -1,0 +1,962 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import math
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+
+ROW_INDEX_COLUMN_NAMES = {"row_index", "index", "__index__"}
+DEFAULT_X_CANDIDATES = [
+    "time_s",
+    "x_norm",
+    "x_value",
+    "x_px",
+    "Timestamp",
+    "timestamp",
+    "time",
+]
+DEFAULT_Y_CANDIDATES = [
+    "bpi_normalized",
+    "y_norm",
+    "y_value",
+    "y_px",
+    "BPI",
+    "bpi",
+    "PPG",
+    "ppg",
+]
+METRICS = [
+    "fusion",
+    "fusion_derivative",
+    "pearson",
+    "spearman",
+    "rmse_z",
+    "mae_z",
+    "rmse_abs",
+    "mae_abs",
+    "bland_altman",
+    "bland_altman_abs",
+    "bias_abs",
+    "derivative",
+    "smooth_pearson",
+    "smooth_derivative",
+    "sign_agreement",
+    "feature_corr",
+]
+EPSILON = 1e-12
+
+
+@dataclass(frozen=True)
+class CsvSeries:
+    path: Path
+    x_column: str
+    y_column: str
+    times: np.ndarray
+    values: np.ndarray
+    source_rows: int
+    valid_rows: int
+    duplicate_time_rows: int
+
+    @property
+    def duration(self) -> float:
+        return float(self.times[-1] - self.times[0])
+
+
+@dataclass(frozen=True)
+class WindowDiagnostics:
+    pearson: float
+    spearman: float
+    rmse_z: float
+    mae_z: float
+    rmse_abs: float
+    mae_abs: float
+    bland_altman: float
+    bland_altman_abs: float
+    bias_abs: float
+    derivative: float
+    smooth_pearson: float
+    smooth_derivative: float
+    sign_agreement: float
+    feature_corr: float
+
+
+@dataclass(frozen=True)
+class MatchResult:
+    rank: int
+    short_name: str
+    metric: str
+    start_time: float
+    end_time: float
+    score: float
+    diagnostics: WindowDiagnostics
+    mean_time_error: float
+    max_time_error: float
+    points: int
+
+
+@dataclass(frozen=True)
+class ScoredSeries:
+    short: CsvSeries
+    grid_offsets: np.ndarray
+    starts: np.ndarray
+    scores_by_metric: dict[str, np.ndarray]
+    diagnostics_by_start: list[WindowDiagnostics]
+    mean_gaps: np.ndarray
+    max_gaps: np.ndarray
+
+
+def parse_float(value: str | None) -> float | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def column_key(name: str) -> str:
+    return name.strip().lower().replace(" ", "_")
+
+
+def choose_column(fieldnames: list[str], requested: str | None, candidates: list[str]) -> str:
+    if requested:
+        if column_key(requested) in ROW_INDEX_COLUMN_NAMES:
+            return "row_index"
+        if requested in fieldnames:
+            return requested
+        requested_key = column_key(requested)
+        for fieldname in fieldnames:
+            if column_key(fieldname) == requested_key:
+                return fieldname
+        raise RuntimeError(f"Column {requested!r} is missing")
+
+    lookup = {column_key(fieldname): fieldname for fieldname in fieldnames}
+    for candidate in candidates:
+        key = column_key(candidate)
+        if key in lookup:
+            return lookup[key]
+
+    candidate_text = ", ".join(candidates)
+    raise RuntimeError(f"Could not find a CSV column among: {candidate_text}")
+
+
+def collapse_duplicate_times(
+    times: np.ndarray,
+    values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    if len(times) <= 1:
+        return times, values, 0
+
+    unique_times, inverse, counts = np.unique(times, return_inverse=True, return_counts=True)
+    duplicate_rows = int(np.sum(counts - 1))
+    if duplicate_rows == 0:
+        return times, values, 0
+
+    sums = np.bincount(inverse, weights=values)
+    means = sums / counts
+    return unique_times.astype(float), means.astype(float), duplicate_rows
+
+
+def read_series(
+    path: Path,
+    *,
+    x_column: str | None,
+    y_column: str | None,
+    sample_rate_hz: float | None,
+) -> CsvSeries:
+    with path.open("r", newline="", encoding="utf-8-sig") as file:
+        reader = csv.DictReader(file)
+        if reader.fieldnames is None:
+            raise RuntimeError(f"CSV has no header: {path}")
+        fieldnames = list(reader.fieldnames)
+        chosen_x = choose_column(fieldnames, x_column, DEFAULT_X_CANDIDATES)
+        chosen_y = choose_column(fieldnames, y_column, DEFAULT_Y_CANDIDATES)
+
+        times: list[float] = []
+        values: list[float] = []
+        source_rows = 0
+        valid_rows = 0
+        for row_index, row in enumerate(reader):
+            source_rows += 1
+            y = parse_float(row.get(chosen_y))
+            if chosen_x == "row_index":
+                if sample_rate_hz is None:
+                    x = float(row_index)
+                else:
+                    if sample_rate_hz <= 0:
+                        raise RuntimeError("Sample rate must be greater than 0")
+                    x = float(row_index) / sample_rate_hz
+            else:
+                x = parse_float(row.get(chosen_x))
+
+            if x is None or y is None:
+                continue
+            times.append(x)
+            values.append(y)
+            valid_rows += 1
+
+    if valid_rows < 3:
+        raise RuntimeError(f"Need at least 3 valid data points in {path}")
+
+    time_array = np.asarray(times, dtype=float)
+    value_array = np.asarray(values, dtype=float)
+    order = np.argsort(time_array, kind="stable")
+    time_array = time_array[order]
+    value_array = value_array[order]
+    time_array, value_array, duplicate_rows = collapse_duplicate_times(time_array, value_array)
+
+    if len(time_array) < 3:
+        raise RuntimeError(f"Need at least 3 unique time points in {path}")
+    if time_array[-1] <= time_array[0]:
+        raise RuntimeError(f"Time axis has no positive duration in {path}")
+
+    return CsvSeries(
+        path=path,
+        x_column=chosen_x,
+        y_column=chosen_y,
+        times=time_array,
+        values=value_array,
+        source_rows=source_rows,
+        valid_rows=valid_rows,
+        duplicate_time_rows=duplicate_rows,
+    )
+
+
+def short_paths_from_args(args: argparse.Namespace) -> list[Path]:
+    if args.short is not None:
+        return [args.short]
+    if args.short_dir is None:
+        raise RuntimeError("Provide either --short or --short-dir")
+    if not args.short_dir.is_dir():
+        raise RuntimeError(f"--short-dir is not a directory: {args.short_dir}")
+    paths = sorted(path for path in args.short_dir.glob(args.short_pattern) if path.is_file())
+    if not paths:
+        raise RuntimeError(f"No short CSV files found in {args.short_dir}")
+    return paths
+
+
+def zscore(values: np.ndarray) -> np.ndarray | None:
+    std = float(np.std(values))
+    if std <= EPSILON:
+        return None
+    return (values - float(np.mean(values))) / std
+
+
+def correlation(left: np.ndarray, right: np.ndarray) -> float:
+    left_z = zscore(left)
+    right_z = zscore(right)
+    if left_z is None or right_z is None:
+        return math.nan
+    return float(np.mean(left_z * right_z))
+
+
+def rankdata(values: np.ndarray) -> np.ndarray:
+    order = np.argsort(values, kind="mergesort")
+    ranks = np.empty(len(values), dtype=float)
+    index = 0
+    while index < len(values):
+        end = index + 1
+        while end < len(values) and values[order[end]] == values[order[index]]:
+            end += 1
+        ranks[order[index:end]] = (index + end - 1) / 2.0
+        index = end
+    return ranks
+
+
+def spearman_correlation(left: np.ndarray, right: np.ndarray) -> float:
+    return correlation(rankdata(left), rankdata(right))
+
+
+def smooth(values: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1:
+        return values.copy()
+    window = min(window, len(values) // 2 * 2 + 1)
+    kernel = np.ones(window, dtype=float) / window
+    return np.convolve(values, kernel, mode="same")
+
+
+def z_rmse(left: np.ndarray, right: np.ndarray) -> float:
+    left_z = zscore(left)
+    right_z = zscore(right)
+    if left_z is None or right_z is None:
+        return math.nan
+    return float(np.sqrt(np.mean((left_z - right_z) ** 2)))
+
+
+def z_mae(left: np.ndarray, right: np.ndarray) -> float:
+    left_z = zscore(left)
+    right_z = zscore(right)
+    if left_z is None or right_z is None:
+        return math.nan
+    return float(np.mean(np.abs(left_z - right_z)))
+
+
+def raw_rmse(left: np.ndarray, right: np.ndarray) -> float:
+    return float(np.sqrt(np.mean((left - right) ** 2)))
+
+
+def raw_mae(left: np.ndarray, right: np.ndarray) -> float:
+    return float(np.mean(np.abs(left - right)))
+
+
+def bland_altman_width(left: np.ndarray, right: np.ndarray) -> float:
+    left_z = zscore(left)
+    right_z = zscore(right)
+    if left_z is None or right_z is None:
+        return math.nan
+    differences = left_z - right_z
+    return float(abs(np.mean(differences)) + 1.96 * np.std(differences))
+
+
+def bland_altman_raw_width(left: np.ndarray, right: np.ndarray) -> float:
+    differences = left - right
+    return float(abs(np.mean(differences)) + 1.96 * np.std(differences))
+
+
+def absolute_bias(left: np.ndarray, right: np.ndarray) -> float:
+    return float(abs(np.mean(left - right)))
+
+
+def sign_agreement(left: np.ndarray, right: np.ndarray) -> float:
+    left_sign = np.sign(np.diff(left))
+    right_sign = np.sign(np.diff(right))
+    valid = (left_sign != 0) & (right_sign != 0)
+    if not np.any(valid):
+        return math.nan
+    return float(np.mean(left_sign[valid] == right_sign[valid]) * 2.0 - 1.0)
+
+
+def morphology_features(values: np.ndarray) -> np.ndarray:
+    values_z = zscore(values)
+    if values_z is None:
+        values_z = np.zeros_like(values)
+    thirds = np.array_split(values_z, 3)
+    return np.concatenate(
+        [
+            np.quantile(values_z, [0.05, 0.25, 0.5, 0.75, 0.95]),
+            np.asarray([part.mean() for part in thirds]),
+            np.asarray([part.std() for part in thirds]),
+        ]
+    )
+
+
+def nearest_sample(
+    long_times: np.ndarray,
+    long_values: np.ndarray,
+    target_times: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    right = np.searchsorted(long_times, target_times, side="left")
+    right = np.clip(right, 0, len(long_times) - 1)
+    left = np.clip(right - 1, 0, len(long_times) - 1)
+
+    left_gap = np.abs(target_times - long_times[left])
+    right_gap = np.abs(long_times[right] - target_times)
+    use_right = right_gap < left_gap
+    indices = np.where(use_right, right, left)
+    gaps = np.abs(long_times[indices] - target_times)
+    return long_values[indices], gaps
+
+
+def linear_sample(
+    long_times: np.ndarray,
+    long_values: np.ndarray,
+    target_times: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    sampled_values = np.interp(target_times, long_times, long_values)
+    _, gaps = nearest_sample(long_times, long_values, target_times)
+    return sampled_values, gaps
+
+
+def candidate_start_times(
+    long_times: np.ndarray,
+    short_duration: float,
+    *,
+    start_step_rows: int,
+    start_step_s: float | None,
+) -> np.ndarray:
+    latest_start = long_times[-1] - short_duration
+    if latest_start < long_times[0]:
+        raise RuntimeError("Short CSV duration is longer than the long CSV duration")
+
+    if start_step_s is not None:
+        if start_step_s <= 0:
+            raise RuntimeError("--start-step-s must be greater than 0")
+        count = int(math.floor((latest_start - long_times[0]) / start_step_s)) + 1
+        starts = long_times[0] + np.arange(count, dtype=float) * start_step_s
+        return starts[starts <= latest_start + EPSILON]
+
+    if start_step_rows <= 0:
+        raise RuntimeError("--start-step-rows must be greater than 0")
+    valid = long_times[long_times <= latest_start + EPSILON]
+    return valid[::start_step_rows]
+
+
+def diagnostics_for_window(
+    short_values: np.ndarray,
+    long_values: np.ndarray,
+    grid_offsets: np.ndarray,
+    smooth_window: int,
+) -> WindowDiagnostics:
+    short_smooth = smooth(short_values, smooth_window)
+    long_smooth = smooth(long_values, smooth_window)
+    short_derivative = np.gradient(short_values, grid_offsets)
+    long_derivative = np.gradient(long_values, grid_offsets)
+    short_smooth_derivative = np.gradient(short_smooth, grid_offsets)
+    long_smooth_derivative = np.gradient(long_smooth, grid_offsets)
+
+    return WindowDiagnostics(
+        pearson=correlation(short_values, long_values),
+        spearman=spearman_correlation(short_values, long_values),
+        rmse_z=z_rmse(short_values, long_values),
+        mae_z=z_mae(short_values, long_values),
+        rmse_abs=raw_rmse(short_values, long_values),
+        mae_abs=raw_mae(short_values, long_values),
+        bland_altman=bland_altman_width(short_values, long_values),
+        bland_altman_abs=bland_altman_raw_width(short_values, long_values),
+        bias_abs=absolute_bias(short_values, long_values),
+        derivative=correlation(short_derivative, long_derivative),
+        smooth_pearson=correlation(short_smooth, long_smooth),
+        smooth_derivative=correlation(short_smooth_derivative, long_smooth_derivative),
+        sign_agreement=sign_agreement(short_smooth, long_smooth),
+        feature_corr=correlation(morphology_features(short_smooth), morphology_features(long_smooth)),
+    )
+
+
+def safe(value: float, fallback: float = 0.0) -> float:
+    return value if math.isfinite(value) else fallback
+
+
+def agreement_from_error(error: float) -> float:
+    if not math.isfinite(error):
+        return 0.0
+    return max(0.0, 1.0 - error)
+
+
+def score_from_diagnostics(metric: str, diagnostics: WindowDiagnostics) -> float:
+    if metric == "pearson":
+        return diagnostics.pearson
+    if metric == "spearman":
+        return diagnostics.spearman
+    if metric == "rmse_z":
+        return -diagnostics.rmse_z
+    if metric == "mae_z":
+        return -diagnostics.mae_z
+    if metric == "rmse_abs":
+        return -diagnostics.rmse_abs
+    if metric == "mae_abs":
+        return -diagnostics.mae_abs
+    if metric == "bland_altman":
+        return -diagnostics.bland_altman
+    if metric == "bland_altman_abs":
+        return -diagnostics.bland_altman_abs
+    if metric == "bias_abs":
+        return -diagnostics.bias_abs
+    if metric == "derivative":
+        return diagnostics.derivative
+    if metric == "smooth_pearson":
+        return diagnostics.smooth_pearson
+    if metric == "smooth_derivative":
+        return diagnostics.smooth_derivative
+    if metric == "sign_agreement":
+        return diagnostics.sign_agreement
+    if metric == "feature_corr":
+        return diagnostics.feature_corr
+    if metric == "fusion_derivative":
+        return (
+            0.388889 * safe(diagnostics.smooth_pearson)
+            + 0.277778 * safe(diagnostics.smooth_derivative)
+            + 0.222222 * safe(diagnostics.spearman)
+            + 0.111111 * safe(diagnostics.sign_agreement)
+        )
+    if metric == "fusion":
+        return (
+            0.437500 * safe(diagnostics.smooth_pearson)
+            + 0.187500 * safe(diagnostics.pearson)
+            + 0.125000 * safe(diagnostics.spearman)
+            + 0.187500 * safe(diagnostics.smooth_derivative)
+            + 0.062500 * safe(diagnostics.feature_corr)
+        )
+    raise RuntimeError(f"Unsupported metric: {metric}")
+
+
+def scored_series_for_short(
+    short: CsvSeries,
+    long: CsvSeries,
+    args: argparse.Namespace,
+) -> ScoredSeries:
+    if args.resample_points < 3:
+        raise RuntimeError("--resample-points must be at least 3")
+
+    short_offsets = short.times - short.times[0]
+    grid_offsets = np.linspace(0.0, short_offsets[-1], args.resample_points)
+    short_values = np.interp(grid_offsets, short_offsets, short.values)
+
+    starts = candidate_start_times(
+        long.times,
+        grid_offsets[-1],
+        start_step_rows=args.start_step_rows,
+        start_step_s=args.start_step_s,
+    )
+    if len(starts) == 0:
+        raise RuntimeError("No valid candidate start times were generated")
+
+    diagnostics_by_start: list[WindowDiagnostics] = []
+    mean_gaps: list[float] = []
+    max_gaps: list[float] = []
+    scores_by_metric = {metric: [] for metric in METRICS}
+
+    for start_time in starts:
+        target_times = float(start_time) + grid_offsets
+        if args.sample_method == "linear":
+            sampled_values, gaps = linear_sample(long.times, long.values, target_times)
+        else:
+            sampled_values, gaps = nearest_sample(long.times, long.values, target_times)
+
+        if args.max_nearest_gap_s is not None and np.any(gaps > args.max_nearest_gap_s):
+            diagnostics = WindowDiagnostics(*(math.nan for _ in range(14)))
+        else:
+            diagnostics = diagnostics_for_window(
+                short_values,
+                sampled_values,
+                grid_offsets,
+                args.smooth_window_points,
+            )
+
+        diagnostics_by_start.append(diagnostics)
+        mean_gaps.append(float(np.mean(gaps)))
+        max_gaps.append(float(np.max(gaps)))
+        for metric in METRICS:
+            scores_by_metric[metric].append(score_from_diagnostics(metric, diagnostics))
+
+    return ScoredSeries(
+        short=short,
+        grid_offsets=grid_offsets,
+        starts=starts,
+        scores_by_metric={
+            metric: np.asarray(scores, dtype=float)
+            for metric, scores in scores_by_metric.items()
+        },
+        diagnostics_by_start=diagnostics_by_start,
+        mean_gaps=np.asarray(mean_gaps, dtype=float),
+        max_gaps=np.asarray(max_gaps, dtype=float),
+    )
+
+
+def result_from_index(
+    scored: ScoredSeries,
+    index: int,
+    *,
+    rank: int,
+    metric: str,
+) -> MatchResult:
+    return MatchResult(
+        rank=rank,
+        short_name=scored.short.path.name,
+        metric=metric,
+        start_time=float(scored.starts[index]),
+        end_time=float(scored.starts[index] + scored.grid_offsets[-1]),
+        score=float(scored.scores_by_metric[metric][index]),
+        diagnostics=scored.diagnostics_by_start[index],
+        mean_time_error=float(scored.mean_gaps[index]),
+        max_time_error=float(scored.max_gaps[index]),
+        points=len(scored.grid_offsets),
+    )
+
+
+def select_top_results(
+    scored: ScoredSeries,
+    *,
+    metric: str,
+    top_count: int,
+    min_start_separation_s: float,
+) -> list[MatchResult]:
+    if top_count <= 0:
+        raise RuntimeError("--top must be greater than 0")
+    if min_start_separation_s < 0:
+        raise RuntimeError("--min-start-separation-s cannot be negative")
+
+    scores = scored.scores_by_metric[metric]
+    ranked_indices = np.argsort(scores)[::-1]
+    selected: list[int] = []
+    for index in ranked_indices:
+        score = float(scores[index])
+        if not math.isfinite(score):
+            continue
+        start = float(scored.starts[index])
+        if all(abs(start - float(scored.starts[existing])) >= min_start_separation_s for existing in selected):
+            selected.append(int(index))
+            if len(selected) >= top_count:
+                break
+
+    return [
+        result_from_index(scored, index, rank=rank, metric=metric)
+        for rank, index in enumerate(selected, start=1)
+    ]
+
+
+def prefix_best_indices(starts: np.ndarray, scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    best_scores = np.empty(len(starts), dtype=float)
+    best_indices = np.empty(len(starts), dtype=int)
+    best_score = -math.inf
+    best_index = -1
+    for index, score in enumerate(scores):
+        score = float(score)
+        if math.isfinite(score) and score > best_score:
+            best_score = score
+            best_index = index
+        best_scores[index] = best_score
+        best_indices[index] = best_index
+    return best_scores, best_indices
+
+
+def select_ordered_non_overlapping(
+    scored_items: list[ScoredSeries],
+    *,
+    metric: str,
+    gap_s: float,
+) -> list[MatchResult]:
+    if len(scored_items) == 1:
+        return select_top_results(
+            scored_items[0],
+            metric=metric,
+            top_count=1,
+            min_start_separation_s=0.0,
+        )
+    if gap_s < 0:
+        raise RuntimeError("--ordered-gap-s cannot be negative")
+
+    previous = scored_items[0]
+    previous_scores = previous.scores_by_metric[metric]
+    previous_paths = [[index] for index in range(len(previous.starts))]
+
+    for item_index in range(1, len(scored_items)):
+        current = scored_items[item_index]
+        previous_duration = scored_items[item_index - 1].grid_offsets[-1]
+        prefix_scores, prefix_indices = prefix_best_indices(previous.starts, previous_scores)
+
+        current_scores = np.full(len(current.starts), -math.inf, dtype=float)
+        current_paths: list[list[int]] = [[] for _ in range(len(current.starts))]
+        for index, start_time in enumerate(current.starts):
+            previous_limit = float(start_time) - previous_duration - gap_s
+            previous_index = int(np.searchsorted(previous.starts, previous_limit, side="right") - 1)
+            own_score = float(current.scores_by_metric[metric][index])
+            if previous_index < 0 or not math.isfinite(own_score):
+                continue
+            best_previous_index = int(prefix_indices[previous_index])
+            if best_previous_index < 0:
+                continue
+            current_scores[index] = prefix_scores[previous_index] + own_score
+            current_paths[index] = previous_paths[best_previous_index] + [index]
+
+        previous = current
+        previous_scores = current_scores
+        previous_paths = current_paths
+
+    final_index = int(np.argmax(previous_scores))
+    if final_index < 0 or not math.isfinite(float(previous_scores[final_index])):
+        raise RuntimeError("No ordered non-overlapping match could be selected")
+
+    indices = previous_paths[final_index]
+    return [
+        result_from_index(item, index, rank=rank, metric=metric)
+        for rank, (item, index) in enumerate(zip(scored_items, indices), start=1)
+    ]
+
+
+def metrics_from_args(args: argparse.Namespace) -> list[str]:
+    if args.metric == "all":
+        return list(METRICS)
+    return [args.metric]
+
+
+def read_inputs(args: argparse.Namespace) -> tuple[list[CsvSeries], CsvSeries]:
+    short_paths = short_paths_from_args(args)
+    short_items = [
+        read_series(
+            path,
+            x_column=args.short_x_column,
+            y_column=args.short_y_column,
+            sample_rate_hz=args.short_sample_rate,
+        )
+        for path in short_paths
+    ]
+    long = read_series(
+        args.long,
+        x_column=args.long_x_column,
+        y_column=args.long_y_column,
+        sample_rate_hz=args.long_sample_rate,
+    )
+    return short_items, long
+
+
+def format_series_summary(series: CsvSeries, label: str) -> str:
+    text = (
+        f"{label}: {series.path} | x={series.x_column} y={series.y_column} | "
+        f"{len(series.times)}/{series.source_rows} points | duration={series.duration:.8g}"
+    )
+    if series.duplicate_time_rows:
+        text += f" | collapsed duplicate-time rows={series.duplicate_time_rows}"
+    return text
+
+
+def format_results(results: list[MatchResult], *, compact: bool = False) -> str:
+    if compact:
+        headers = ["rank", "short_csv", "metric", "start_time", "end_time", "score"]
+        rows = [
+            [
+                str(result.rank),
+                result.short_name,
+                result.metric,
+                f"{result.start_time:.10g}",
+                f"{result.end_time:.10g}",
+                f"{result.score:.6f}",
+            ]
+            for result in results
+        ]
+    else:
+        headers = [
+            "rank",
+            "short_csv",
+            "metric",
+            "start_time",
+            "end_time",
+            "score",
+            "pearson",
+            "spearman",
+            "rmse_z",
+            "mae_abs",
+            "rmse_abs",
+            "ba_width",
+            "ba_abs",
+            "smooth_r",
+            "smooth_dr",
+            "mean_gap",
+            "max_gap",
+        ]
+        rows = [
+            [
+                str(result.rank),
+                result.short_name,
+                result.metric,
+                f"{result.start_time:.10g}",
+                f"{result.end_time:.10g}",
+                f"{result.score:.6f}",
+                f"{result.diagnostics.pearson:.6f}",
+                f"{result.diagnostics.spearman:.6f}",
+                f"{result.diagnostics.rmse_z:.6f}",
+                f"{result.diagnostics.mae_abs:.6f}",
+                f"{result.diagnostics.rmse_abs:.6f}",
+                f"{result.diagnostics.bland_altman:.6f}",
+                f"{result.diagnostics.bland_altman_abs:.6f}",
+                f"{result.diagnostics.smooth_pearson:.6f}",
+                f"{result.diagnostics.smooth_derivative:.6f}",
+                f"{result.mean_time_error:.6g}",
+                f"{result.max_time_error:.6g}",
+            ]
+            for result in results
+        ]
+
+    widths = [
+        max(len(headers[column]), *(len(row[column]) for row in rows))
+        for column in range(len(headers))
+    ]
+    output = ["  ".join(headers[index].ljust(widths[index]) for index in range(len(headers)))]
+    output.append("  ".join("-" * width for width in widths))
+    for row in rows:
+        output.append("  ".join(row[index].ljust(widths[index]) for index in range(len(row))))
+    return "\n".join(output)
+
+
+def write_results(path: Path, results: list[MatchResult]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as file:
+        fieldnames = [
+            "rank",
+            "short_csv",
+            "metric",
+            "start_time",
+            "end_time",
+            "score",
+            "pearson",
+            "spearman",
+            "rmse_z",
+            "mae_z",
+            "rmse_abs",
+            "mae_abs",
+            "bland_altman",
+            "bland_altman_abs",
+            "bias_abs",
+            "derivative",
+            "smooth_pearson",
+            "smooth_derivative",
+            "sign_agreement",
+            "feature_corr",
+            "mean_time_error",
+            "max_time_error",
+            "points",
+        ]
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        for result in results:
+            diagnostics = result.diagnostics
+            writer.writerow(
+                {
+                    "rank": result.rank,
+                    "short_csv": result.short_name,
+                    "metric": result.metric,
+                    "start_time": f"{result.start_time:.10g}",
+                    "end_time": f"{result.end_time:.10g}",
+                    "score": f"{result.score:.10g}",
+                    "pearson": f"{diagnostics.pearson:.10g}",
+                    "spearman": f"{diagnostics.spearman:.10g}",
+                    "rmse_z": f"{diagnostics.rmse_z:.10g}",
+                    "mae_z": f"{diagnostics.mae_z:.10g}",
+                    "rmse_abs": f"{diagnostics.rmse_abs:.10g}",
+                    "mae_abs": f"{diagnostics.mae_abs:.10g}",
+                    "bland_altman": f"{diagnostics.bland_altman:.10g}",
+                    "bland_altman_abs": f"{diagnostics.bland_altman_abs:.10g}",
+                    "bias_abs": f"{diagnostics.bias_abs:.10g}",
+                    "derivative": f"{diagnostics.derivative:.10g}",
+                    "smooth_pearson": f"{diagnostics.smooth_pearson:.10g}",
+                    "smooth_derivative": f"{diagnostics.smooth_derivative:.10g}",
+                    "sign_agreement": f"{diagnostics.sign_agreement:.10g}",
+                    "feature_corr": f"{diagnostics.feature_corr:.10g}",
+                    "mean_time_error": f"{result.mean_time_error:.10g}",
+                    "max_time_error": f"{result.max_time_error:.10g}",
+                    "points": result.points,
+                }
+            )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Find the long-CSV interval whose waveform best matches shorter CSV data.",
+    )
+    short_input = parser.add_mutually_exclusive_group(required=True)
+    short_input.add_argument("--short", type=Path, help="Short CSV path.")
+    short_input.add_argument("--short-dir", type=Path, help="Folder of short CSV files, processed in sorted order.")
+    parser.add_argument("--short-pattern", default="*.csv", help="Filename pattern for --short-dir. Default: *.csv.")
+    parser.add_argument("--long", type=Path, required=True, help="Long CSV path.")
+    parser.add_argument("--short-x-column", help="Short CSV time/x column. Use row_index to synthesize time from rows.")
+    parser.add_argument("--short-y-column", help="Short CSV signal/y column.")
+    parser.add_argument("--long-x-column", help="Long CSV time/x column. Use row_index to synthesize time from rows.")
+    parser.add_argument("--long-y-column", help="Long CSV signal/y column.")
+    parser.add_argument("--short-sample-rate", type=float, help="Hz used when --short-x-column row_index is selected.")
+    parser.add_argument("--long-sample-rate", type=float, help="Hz used when --long-x-column row_index is selected.")
+    parser.add_argument(
+        "--metric",
+        choices=["all", *METRICS],
+        default="fusion",
+        help="Scoring metric. Use all to compare every supported metric. Default: fusion.",
+    )
+    parser.add_argument(
+        "--sample-method",
+        choices=["nearest", "linear"],
+        default="nearest",
+        help="How to sample long CSV at shifted short time points. Default: nearest.",
+    )
+    parser.add_argument(
+        "--resample-points",
+        type=int,
+        default=300,
+        help="Resample each candidate window to this many points before scoring. Default: 300.",
+    )
+    parser.add_argument(
+        "--smooth-window-points",
+        type=int,
+        default=15,
+        help="Moving-average window, in resampled points, for smooth metrics. Default: 15.",
+    )
+    parser.add_argument("--top", type=int, default=5, help="Top starts to print for single-short mode. Default: 5.")
+    parser.add_argument("--start-step-rows", type=int, default=1, help="Slide by this many long-CSV rows. Default: 1.")
+    parser.add_argument("--start-step-s", type=float, help="Fixed start-time step; overrides --start-step-rows.")
+    parser.add_argument(
+        "--min-start-separation-s",
+        type=float,
+        default=0.0,
+        help="Minimum separation between reported starts in single-short mode. Default: 0.",
+    )
+    parser.add_argument(
+        "--independent",
+        action="store_true",
+        help="For --short-dir, print independent top matches instead of one ordered non-overlapping assignment.",
+    )
+    parser.add_argument(
+        "--ordered-gap-s",
+        type=float,
+        default=0.0,
+        help="Extra required gap between ordered non-overlapping windows. Default: 0.",
+    )
+    parser.add_argument("--max-nearest-gap-s", type=float, help="Reject windows with a larger nearest-time gap.")
+    parser.add_argument("--output", type=Path, help="Optional CSV path for the match table.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        short_items, long = read_inputs(args)
+        scored_items = [
+            scored_series_for_short(short, long, args)
+            for short in short_items
+        ]
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(format_series_summary(long, "long"))
+    for short in short_items:
+        print(format_series_summary(short, "short"))
+    print(
+        f"sample={args.sample_method} | resample_points={args.resample_points} | "
+        f"smooth_window_points={args.smooth_window_points}"
+    )
+
+    metrics = metrics_from_args(args)
+    all_results: list[MatchResult] = []
+    if len(scored_items) == 1 or args.independent:
+        for scored in scored_items:
+            for metric in metrics:
+                results = select_top_results(
+                    scored,
+                    metric=metric,
+                    top_count=args.top,
+                    min_start_separation_s=args.min_start_separation_s,
+                )
+                all_results.extend(results)
+                print()
+                print(format_results(results, compact=args.metric == "all"))
+    else:
+        for metric in metrics:
+            results = select_ordered_non_overlapping(
+                scored_items,
+                metric=metric,
+                gap_s=args.ordered_gap_s,
+            )
+            all_results.extend(results)
+            print()
+            print(f"ordered non-overlapping selection | metric={metric}")
+            print(format_results(results, compact=args.metric == "all"))
+
+    if args.output is not None:
+        write_results(args.output, all_results)
+        print(f"\nwrote {args.output}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

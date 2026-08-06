@@ -3,7 +3,7 @@
 
 通用说明
 --------
-- 三个入口：main.py、vevo_stitcher.py、normalizer.py。
+- 五个入口：main.py、vevo_stitcher.py、ultrasound_normalizer.py、wearable_normalizer.py、csv_interval_matcher.py。
 - --root 用于指定一次实验的根目录；只有没有手动输入 --input 或 --output 时才会生效。
 - 如果同时输入 --root 和 --input/--output，显式输入的 --input/--output 优先。
 
@@ -127,12 +127,46 @@ WAV 频谱外缘提取：
 - --wav-plot-duration：WAV 图显示时长，默认 1.1 秒。
 
 
-3. normalizer.py：CSV 统一归一化
--------------------------------
+3. wearable_normalizer.py：Wearable BPI CSV 归一化绘图
+-----------------------------------------------------
+用途：读取 Wearable CSV，生成新增 time_s 与 bpi_normalized 的处理后 CSV，
+并用 Matplotlib 打开窗口查看 BPI 归一化曲线。
+
+常用命令：
+python wearable_normalizer.py --input "../20260805/Test2/Wearable_2.csv"
+
+默认路径：
+- 输入：ROOT_PATH
+- 输出：单个 CSV 时默认写到原文件旁边；文件夹输入时默认写到 INPUT/BPI_Processed
+
+路径与绘图：
+- --root：实验根目录；只有没有手动输入 --input 时才会作为默认输入。
+- --input：输入 Wearable CSV 文件或包含 CSV 的文件夹。
+- --output：输出 CSV 文件路径，或批量处理时的输出文件夹。
+- --plot-output：保存绘图 PNG 的路径或文件夹；设置后会自动保存图。
+- --save-plot：自动保存图，同时仍显示 Matplotlib 窗口。
+- --no-plot：不显示也不保存图，只生成处理后 CSV。
+- --timestamp-column：指定 timestamp 列名；默认自动识别 Timestamp。
+- --bpi-column：指定 BPI 原始数据列名；默认自动识别 BPI。
+- --noise-sample-count：在 min-max 归一化后随机抽取多少个有效点估计底噪，默认 2000。
+- --noise-seed：底噪随机抽样种子，默认 0；固定 seed 可保证重复运行结果一致。
+- --no-denoise：关闭归一化后的底噪抽样、删点和除底噪步骤；若要完全回到旧的 min-max 输出，还需设置 --bpi-smooth-window-points 1。
+- --bpi-smooth-window-points：去底噪后对 bpi_normalized 做居中移动平均的窗口点数，默认 15；设为 1 可关闭，必须为奇数。
+
+处理后的 CSV 会保留原列，并新增：
+- time_s：每个 Timestamp 减去第一个 Timestamp。
+- bpi_normalized：BPI 原始数据先按 min-max 归一化，再随机抽取 2000 个归一化点取平均作为底噪，删除这些抽样点，剩余点除以底噪值，最后做小窗口平滑；因此结果可能大于 1。
+
+默认只打开 Matplotlib 窗口，不会在命令行询问是否保存图片。设置
+--plot-output 或 --save-plot 时才会自动保存图片。
+
+
+4. ultrasound_normalizer.py：CSV 统一归一化
+-----------------------------------------
 用途：读取 raw_data 中的 CSV，生成 norm_data 中的归一化 CSV。
 
 常用命令：
-python normalizer.py --root "../Tester1"
+python ultrasound_normalizer.py --root "../Tester1"
 
 默认路径：
 - 输入：ROOT_PATH/raw_data
@@ -152,6 +186,52 @@ python normalizer.py --root "../Tester1"
 - --no-invert-y：不反转 y 轴；默认会把图像像素 y 轴转换成正常图表方向。
 
 
+5. csv_interval_matcher.py：短 CSV 与长 CSV 波形区间匹配
+--------------------------------------------------------
+用途：给定一个短 CSV 和一个长 CSV，将短 CSV 的相对时间轴沿长 CSV 滑动，
+逐个候选窗口评分，输出最相似的起始时间。
+
+常用命令：
+python csv_interval_matcher.py --short "../20260805/Test2/Norm_Data/Test2-1.csv" --long "../20260805/Test2/Wearable_2_bpi_processed.csv"
+
+已知多个短 CSV 按文件名排序且互不重叠时：
+python csv_interval_matcher.py --short-dir "../20260805/Test2/Norm_Data" --long "../20260805/Test2/Wearable_2_bpi_processed.csv"
+
+比较所有指标：
+python csv_interval_matcher.py --short-dir "../20260805/Test2/Norm_Data" --long "../20260805/Test2/Wearable_2_bpi_processed.csv" --metric all --start-step-rows 10
+
+默认自动识别：
+- 时间列：time_s、x_norm、x_value、x_px、Timestamp。
+- 数值列：bpi_normalized、y_norm、y_value、y_px、BPI。
+
+匹配与评分：
+- 单个 --short 输入时，默认按长 CSV 的每一个时间点作为候选起点逐点滑动。
+- --short-dir 输入时，默认按短 CSV 文件名字典序选择一组有序、互不重叠的区间。
+- 对每个短 CSV 时间点，默认取长 CSV 中最接近的时间点。
+- 默认 metric=fusion，融合平滑 Pearson、普通 Pearson、Spearman、平滑导数相关和形态特征相关；raw 归一化 MAE/RMSE、Bland-Altman 等绝对数值指标仍可单独查看，但不再进入默认 fusion 分数。
+- score 越高表示波形越相像；rmse_z、mae_abs、rmse_abs 越低表示误差越小。
+
+常用参数：
+- --short：输入单个短 CSV。
+- --short-dir：输入短 CSV 文件夹，按文件名字典序处理。
+- --short-x-column / --short-y-column：指定短 CSV 的时间列和数值列。
+- --long-x-column / --long-y-column：指定长 CSV 的时间列和数值列。
+- --metric：选择 fusion、fusion_derivative、pearson、spearman、rmse_z、mae_z、rmse_abs、mae_abs、bland_altman、bland_altman_abs、bias_abs、derivative、smooth_pearson、smooth_derivative、sign_agreement、feature_corr，或 all。
+- --top：输出前几个匹配结果，默认 5。
+- --min-start-separation-s：输出结果之间的最小起始时间间隔；用于避免 top 5 全部挤在同一段。
+- --independent：使用 short-dir 时不做有序非重叠全局匹配，而是每个短 CSV 独立输出 top 匹配。
+- --ordered-gap-s：有序非重叠匹配时，区间之间额外要求的间隔。
+- --sample-method：nearest 或 linear；默认 nearest。
+- --resample-points：每个候选窗口重采样为多少点后评分；默认 300。
+- --smooth-window-points：平滑指标使用的移动平均窗口点数；默认 15。
+- --start-step-rows：每隔多少个长 CSV 点滑动一次；默认 1。
+- --start-step-s：固定时间步长滑动；设置后覆盖 start-step-rows。
+- --output：把 top 匹配表保存为 CSV。
+
+如果长 CSV 的 timestamp 丢失小数精度，可以用行号和采样率重建时间轴：
+python csv_interval_matcher.py --short "short.csv" --long "long.csv" --long-x-column row_index --long-sample-rate 250
+
+
 推荐调参顺序
 ------------
 1. 拼接有问题时，先调 vevo_stitcher.py：
@@ -166,7 +246,12 @@ python normalizer.py --root "../Tester1"
    - --tolerance
    - --min-area
 
-3. 归一化只在比较多份 CSV 时使用 normalizer.py：
+3. 归一化只在比较多份 CSV 时使用 ultrasound_normalizer.py：
    - --duration-s
    - --x-column
    - --y-column
+
+4. 短/长 CSV 区间匹配先调 csv_interval_matcher.py：
+   - --short-x-column / --short-y-column
+   - --long-x-column / --long-y-column
+   - --min-start-separation-s

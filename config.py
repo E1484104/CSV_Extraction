@@ -7,7 +7,7 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 # Edit this one path for each experiment. Command-line --input/--output can
 # still override the derived defaults in each tool.
-ROOT_PATH = Path(r"../20260803")
+ROOT_PATH = Path(r"../20260805/Test3")
 
 RAW_IMAGES_DIRNAME = "Raw_Images"
 STITCHED_IMAGES_DIRNAME = "Stitched_Images"
@@ -44,7 +44,7 @@ OUTPUT_PATH = RAW_DATA_PATH
 STITCHER_INPUT_PATH = RAW_IMAGES_PATH
 STITCHER_OUTPUT_PATH = STITCHED_IMAGES_PATH
 
-# Defaults for normalizer.py: raw CSV data -> normalized CSV data.
+# Defaults for ultrasound_normalizer.py: raw CSV data -> normalized CSV data.
 NORMALIZER_INPUT_PATH = RAW_DATA_PATH
 NORMALIZER_OUTPUT_PATH = NORM_DATA_PATH
 

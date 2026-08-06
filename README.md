@@ -1,6 +1,8 @@
 # CSV Extraction
 
 Extract a colored plot curve from a local image and save the traced line as a CSV file.
+The repo also includes standalone helpers for image stitching, CSV normalization,
+wearable BPI CSV plotting, and waveform interval matching.
 
 This is intended for screenshots or exported figures where the target curve color is reasonably consistent against the background. The line does not need to stay in the same value range across images.
 
@@ -23,7 +25,7 @@ Or pass the root folder from the command line:
 ```powershell
 python vevo_stitcher.py --root "../TesterX"
 python main.py --root "../TesterX" --no-plot
-python normalizer.py --root "../TesterX"
+python ultrasound_normalizer.py --root "../TesterX"
 ```
 
 The default workflow expects this folder layout:
@@ -46,12 +48,12 @@ python vevo_stitcher.py
 
 python main.py --no-plot
 
-python normalizer.py
+python ultrasound_normalizer.py
 ```
 
 By default, `vevo_stitcher.py` reads `TesterX/Raw_Images/series_*` and writes
 `TesterX/Stitched_Images/TesterX-1.png`, `TesterX-2.png`, and so on. `main.py` reads
-`TesterX/Stitched_Images` and writes CSV files to `TesterX/raw_data`. `normalizer.py`
+`TesterX/Stitched_Images` and writes CSV files to `TesterX/raw_data`. `ultrasound_normalizer.py`
 reads `TesterX/raw_data` and writes normalized CSV files to `TesterX/norm_data`.
 
 You can still override `--input` and `--output` from the command line. Explicit
@@ -73,7 +75,7 @@ x_px,y_px
 515,411
 ```
 
-Use `normalizer.py` when you want shared normalization across CSV files.
+Use `ultrasound_normalizer.py` when you want shared normalization across CSV files.
 
 ## Line Plot
 
@@ -105,19 +107,134 @@ Skip plot generation and keep CSV-only output:
 python main.py --input "image.png" --output "curve.csv" --no-plot
 ```
 
+## Wearable BPI CSV Plot
+
+`wearable_normalizer.py` is a standalone helper. It can read a wearable CSV
+such as `Wearable_2.csv` with columns like:
+
+```csv
+Timestamp,BPI,PPG
+1741065063.3578727,597.286865234375,54.693328857421875
+```
+
+It writes a new processed CSV preserving the original columns and adding:
+
+```csv
+time_s,bpi_normalized
+```
+
+`time_s` is each timestamp minus the first timestamp in the file. `bpi_normalized`
+is first min-max normalized from the raw BPI column, then post-normalization
+denoised by randomly sampling 2000 valid normalized points, averaging them as
+the noise floor, removing those sampled rows, and dividing the remaining
+normalized values by that noise floor. The denoised values are then smoothed
+with a 15-point centered moving average by default. Because of the noise-floor
+division, `bpi_normalized` can be greater than `1`.
+
+```powershell
+python wearable_normalizer.py --input "../20260805/Test2/Wearable_2.csv"
+```
+
+By default, the processed CSV is saved next to the input CSV as
+`Wearable_2_bpi_processed.csv`. A Matplotlib window opens for inspection and the
+script does not save a PNG unless you request it. If you prefer to choose the output
+location and save the figure automatically:
+
+```powershell
+python wearable_normalizer.py --input "../20260805/Test2/Wearable_2.csv" `
+  --output "Wearable_2_bpi_processed.csv" `
+  --plot-output "Wearable_2_bpi_normalized.png"
+```
+
+If the wearable CSV uses different headers, specify them:
+
+```powershell
+python wearable_normalizer.py --input "wearable.csv" --timestamp-column Timestamp --bpi-column BPI
+```
+
+Noise-floor sampling is deterministic by default (`--noise-seed 0`) so repeated
+runs are comparable. For a raw min-max control run, use `--no-denoise` and
+`--bpi-smooth-window-points 1`. Otherwise, tune the sample count and smoothing
+window:
+
+```powershell
+python wearable_normalizer.py --input "wearable.csv" `
+  --noise-sample-count 2000 `
+  --noise-seed 0 `
+  --bpi-smooth-window-points 15
+```
+
+## CSV Interval Matching
+
+`csv_interval_matcher.py` finds the long-CSV interval whose waveform best matches a
+short CSV. It slides the short CSV's relative time axis over the long CSV, samples the
+long CSV at the shifted short timestamps, scores each candidate window, and prints the
+top start times.
+
+```powershell
+python csv_interval_matcher.py `
+  --short "../20260805/Test2/Norm_Data/Test2-1.csv" `
+  --long "../20260805/Test2/Wearable_2_bpi_processed.csv"
+```
+
+By default it auto-detects time columns from `time_s`, `x_norm`, `x_value`, `x_px`,
+or `Timestamp`, and signal columns from `bpi_normalized`, `y_norm`, `y_value`, `y_px`,
+or `BPI`. The default `fusion` metric combines smoothed Pearson correlation,
+ordinary Pearson correlation, Spearman correlation, smoothed derivative correlation,
+a low-dimensional morphology feature correlation. Absolute-value diagnostics such
+as raw normalized MAE/RMSE and Bland-Altman width remain available as standalone
+metrics, but they are no longer part of the default fusion score.
+
+For multiple short CSVs known to be in sorted order, pass the folder. The tool then
+selects one ordered, non-overlapping interval for each short CSV:
+
+```powershell
+python csv_interval_matcher.py `
+  --short-dir "../20260805/Test2/Norm_Data" `
+  --long "../20260805/Test2/Wearable_2_bpi_processed.csv"
+```
+
+Compare all available metrics:
+
+```powershell
+python csv_interval_matcher.py `
+  --short-dir "../20260805/Test2/Norm_Data" `
+  --long "../20260805/Test2/Wearable_2_bpi_processed.csv" `
+  --metric all --start-step-rows 10
+```
+
+Useful options:
+
+```powershell
+python csv_interval_matcher.py --short "short.csv" --long "long.csv" `
+  --short-x-column x_norm --short-y-column y_norm `
+  --long-x-column time_s --long-y-column bpi_normalized `
+  --metric fusion `
+  --min-start-separation-s 5 `
+  --output "top_matches.csv"
+```
+
+If a CSV timestamp column has lost sub-second precision, synthesize the time axis from
+row index and the known sampling rate:
+
+```powershell
+python csv_interval_matcher.py --short "short.csv" --long "long.csv" `
+  --long-x-column row_index --long-sample-rate 250
+```
+
 ## Batch Normalize CSV Files
 
-`normalizer.py` is a standalone helper. It is not connected to `main.py`.
+`ultrasound_normalizer.py` is a standalone helper. It is not connected to `main.py`.
 It accepts either one CSV file or a folder of CSV files. It maps each CSV's x range to
 the same time span, uses one shared y range across the selected CSV files, and writes
 one normalized CSV for each input CSV.
 
 ```powershell
-python normalizer.py
+python ultrasound_normalizer.py
 
-python normalizer.py --input "curve.csv" --output "curve_normalized.csv"
+python ultrasound_normalizer.py --input "curve.csv" --output "curve_normalized.csv"
 
-python normalizer.py --input "csv" --output "csv_normalized"
+python ultrasound_normalizer.py --input "csv" --output "csv_normalized"
 ```
 
 Each output CSV preserves the original columns and adds:
@@ -134,13 +251,13 @@ larger values higher on the graph.
 Useful options:
 
 ```powershell
-python normalizer.py --input "csv" --output "csv_normalized" `
+python ultrasound_normalizer.py --input "csv" --output "csv_normalized" `
   --x-column x_px --y-column y_px
 
-python normalizer.py --input "csv" --output "csv_normalized" `
+python ultrasound_normalizer.py --input "csv" --output "csv_normalized" `
   --duration-s 30
 
-python normalizer.py --input "csv" --output "csv_normalized" `
+python ultrasound_normalizer.py --input "csv" --output "csv_normalized" `
   --recursive
 ```
 
