@@ -7,7 +7,7 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 # Edit this one path for each experiment. Command-line --input/--output can
 # still override the derived defaults in each tool.
-ROOT_PATH = Path(r"../20260805/Test3")
+ROOT_PATH = Path(r"../20260805/Test11")
 
 RAW_IMAGES_DIRNAME = "Raw_Images"
 STITCHED_IMAGES_DIRNAME = "Stitched_Images"

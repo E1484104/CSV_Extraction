@@ -43,6 +43,9 @@ class WearableBpiStats:
     noise_floor: float | None
     removed_noise_points: int
     smooth_window_points: int
+    bottom_envelop: bool
+    bottom_envelope_min: float | None
+    bottom_envelope_max: float | None
     row_count: int
     point_count: int
 
@@ -176,6 +179,63 @@ def smooth_values(values: list[float], window_points: int) -> list[float]:
     return smoothed
 
 
+def lower_envelope_values(values: list[float]) -> list[float]:
+    if not values:
+        return []
+    if len(values) == 1:
+        return list(values)
+
+    minima_indices: list[int] = []
+    if values[0] <= values[1]:
+        minima_indices.append(0)
+
+    for index in range(1, len(values) - 1):
+        current = values[index]
+        previous_value = values[index - 1]
+        next_value = values[index + 1]
+        if (
+            current <= previous_value
+            and current <= next_value
+            and (current < previous_value or current < next_value)
+        ):
+            minima_indices.append(index)
+
+    last_index = len(values) - 1
+    if values[last_index] <= values[last_index - 1]:
+        minima_indices.append(last_index)
+
+    if not minima_indices:
+        floor = min(values)
+        return [floor] * len(values)
+
+    envelope = [values[minima_indices[0]]] * len(values)
+    for left_index, right_index in zip(minima_indices, minima_indices[1:]):
+        left_value = values[left_index]
+        right_value = values[right_index]
+        width = right_index - left_index
+        for index in range(left_index, right_index + 1):
+            ratio = (index - left_index) / width
+            envelope[index] = left_value + (right_value - left_value) * ratio
+
+    last_minimum_index = minima_indices[-1]
+    for index in range(last_minimum_index + 1, len(values)):
+        envelope[index] = values[last_minimum_index]
+
+    return [
+        min(envelope_value, value)
+        for envelope_value, value in zip(envelope, values)
+    ]
+
+
+def bottom_zero_values(values: list[float]) -> tuple[list[float], list[float]]:
+    envelope = lower_envelope_values(values)
+    corrected = [
+        0.0 if abs(value - envelope_value) <= 1e-12 else value - envelope_value
+        for value, envelope_value in zip(values, envelope)
+    ]
+    return corrected, envelope
+
+
 def processed_rows(
     data: WearableCsvData,
     timestamp_column: str,
@@ -183,6 +243,7 @@ def processed_rows(
     noise_sample_count: int,
     noise_seed: int,
     bpi_smooth_window_points: int,
+    bottom_envelop: bool,
 ) -> tuple[list[dict[str, str]], WearableBpiStats]:
     valid_points: list[tuple[int, float, float]] = []
     for index, row in enumerate(data.rows):
@@ -224,9 +285,15 @@ def processed_rows(
         [adjusted for _, _, adjusted in valid_remaining],
         bpi_smooth_window_points,
     )
+    if bottom_envelop:
+        output_values, envelope_values = bottom_zero_values(smoothed_values)
+    else:
+        output_values = smoothed_values
+        envelope_values = []
+
     adjusted_by_index = {
         index: adjusted
-        for (index, _, _), adjusted in zip(valid_remaining, smoothed_values)
+        for (index, _, _), adjusted in zip(valid_remaining, output_values)
     }
     output: list[dict[str, str]] = []
     point_count = 0
@@ -263,6 +330,9 @@ def processed_rows(
         noise_floor=noise_floor,
         removed_noise_points=len(noise_indices),
         smooth_window_points=bpi_smooth_window_points,
+        bottom_envelop=bottom_envelop,
+        bottom_envelope_min=min(envelope_values) if envelope_values else None,
+        bottom_envelope_max=max(envelope_values) if envelope_values else None,
         row_count=len(data.rows),
         point_count=point_count,
     )
@@ -407,9 +477,14 @@ def process_wearable_bpi_csv(
         data,
         timestamp_column=timestamp_column,
         bpi_column=bpi_column,
-        noise_sample_count=0 if getattr(args, "no_denoise", False) else args.noise_sample_count,
+        noise_sample_count=(
+            args.noise_sample_count
+            if getattr(args, "denoise", False) and not getattr(args, "no_denoise", False)
+            else 0
+        ),
         noise_seed=args.noise_seed,
         bpi_smooth_window_points=args.bpi_smooth_window_points,
+        bottom_envelop=getattr(args, "bottom_envelop", False),
     )
     write_processed_csv(output_csv_path, processed_fieldnames(data.fieldnames), rows)
 
@@ -476,6 +551,13 @@ def format_wearable_bpi_result(processed: ProcessedWearableBpi) -> str:
             f"removed={stats.removed_noise_points}"
         )
     smooth_info = f" | smooth_window={stats.smooth_window_points}"
+    if stats.bottom_envelop and stats.bottom_envelope_min is not None:
+        bottom_info = (
+            f" | bottom_envelop=[{stats.bottom_envelope_min:.8g}, "
+            f"{stats.bottom_envelope_max:.8g}]"
+        )
+    else:
+        bottom_info = ""
     return (
         f"{processed.input_path} -> {processed.csv_path} | "
         f"{stats.point_count}/{stats.row_count} points | "
@@ -483,6 +565,7 @@ def format_wearable_bpi_result(processed: ProcessedWearableBpi) -> str:
         f"BPI {stats.bpi_column} [{stats.bpi_min:.8g}, {stats.bpi_max:.8g}] "
         f"-> {BPI_NORMALIZED_COLUMN}{noise_info}"
         f"{smooth_info}"
+        f"{bottom_info}"
         f"{plot_info}"
     )
 
@@ -547,9 +630,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_NOISE_SAMPLE_COUNT,
         help=(
-            "After min-max normalization, randomly sample this many valid points, "
-            "average them as the noise floor, remove those rows, and divide the "
-            f"remaining normalized BPI values by that floor. Default: {DEFAULT_NOISE_SAMPLE_COUNT}."
+            "Used only with --denoise. After min-max normalization, randomly sample "
+            "this many valid points, average them as the noise floor, remove those "
+            "rows, and divide the remaining normalized BPI values by that floor. "
+            f"Default: {DEFAULT_NOISE_SAMPLE_COUNT}."
         ),
     )
     parser.add_argument(
@@ -558,19 +642,38 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_NOISE_SEED,
         help=f"Random seed for noise-floor sampling. Default: {DEFAULT_NOISE_SEED}.",
     )
-    parser.add_argument(
-        "--no-denoise",
+    denoise_group = parser.add_mutually_exclusive_group()
+    denoise_group.add_argument(
+        "--denoise",
         action="store_true",
-        help="Disable post-normalization noise-floor removal and division.",
+        help="Enable post-normalization noise-floor removal and division. Default: off.",
     )
+    denoise_group.add_argument(
+        "--no-denoise",
+        action="store_false",
+        dest="denoise",
+        help="Keep post-normalization noise-floor removal disabled. This is the default.",
+    )
+    parser.set_defaults(denoise=False)
     parser.add_argument(
         "--bpi-smooth-window-points",
         type=int,
         default=DEFAULT_BPI_SMOOTH_WINDOW_POINTS,
         help=(
             "Centered moving-average window applied to bpi_normalized after "
-            "post-normalization denoising. Use 1 to disable. Must be odd. "
+            "normalization. Use 1 to disable. Must be odd. "
             f"Default: {DEFAULT_BPI_SMOOTH_WINDOW_POINTS}."
+        ),
+    )
+    parser.add_argument(
+        "--bottom-envelop",
+        "--bottom-envelope",
+        action="store_true",
+        dest="bottom_envelop",
+        help=(
+            "After wearable BPI normalization and smoothing, estimate the lower "
+            "envelope from local minima and subtract it from each bpi_normalized "
+            "point. Default: off."
         ),
     )
     return parser

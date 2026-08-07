@@ -124,12 +124,11 @@ time_s,bpi_normalized
 ```
 
 `time_s` is each timestamp minus the first timestamp in the file. `bpi_normalized`
-is first min-max normalized from the raw BPI column, then post-normalization
-denoised by randomly sampling 2000 valid normalized points, averaging them as
-the noise floor, removing those sampled rows, and dividing the remaining
-normalized values by that noise floor. The denoised values are then smoothed
-with a 15-point centered moving average by default. Because of the noise-floor
-division, `bpi_normalized` can be greater than `1`.
+is min-max normalized from the raw BPI column and then smoothed with a 15-point
+centered moving average by default. The old post-normalization noise-floor step is
+disabled by default because it mostly rescales the signal and randomly removes rows.
+Pass `--bottom-envelop` to estimate the lower envelope of the normalized wearable
+curve and subtract it from every point so the curve bottom is shifted to zero.
 
 ```powershell
 python wearable_normalizer.py --input "../20260805/Test2/Wearable_2.csv"
@@ -152,16 +151,31 @@ If the wearable CSV uses different headers, specify them:
 python wearable_normalizer.py --input "wearable.csv" --timestamp-column Timestamp --bpi-column BPI
 ```
 
-Noise-floor sampling is deterministic by default (`--noise-seed 0`) so repeated
-runs are comparable. For a raw min-max control run, use `--no-denoise` and
-`--bpi-smooth-window-points 1`. Otherwise, tune the sample count and smoothing
-window:
+For the old noise-floor workflow, pass `--denoise`. It randomly samples normalized
+points, averages them as the noise floor, removes those sampled rows, and divides the
+remaining normalized values by that floor; because of that division,
+`bpi_normalized` can become greater than `1`. Noise-floor sampling is deterministic
+by default (`--noise-seed 0`) so repeated runs are comparable.
 
 ```powershell
 python wearable_normalizer.py --input "wearable.csv" `
+  --denoise `
   --noise-sample-count 2000 `
-  --noise-seed 0 `
-  --bpi-smooth-window-points 15
+  --noise-seed 0
+```
+
+For raw min-max without smoothing, use:
+
+```powershell
+python wearable_normalizer.py --input "wearable.csv" `
+  --bpi-smooth-window-points 1
+```
+
+To bottom-zero the normalized wearable curve after smoothing, use:
+
+```powershell
+python wearable_normalizer.py --input "wearable.csv" `
+  --bottom-envelop
 ```
 
 ## CSV Interval Matching
@@ -213,6 +227,27 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" `
   --min-start-separation-s 5 `
   --output "top_matches.csv"
 ```
+
+Show the full long CSV with matched short curves aligned onto the same time axis:
+
+```powershell
+python csv_interval_matcher.py --short "short.csv" --long "long.csv" `
+  --top 1
+```
+
+Save the overlay only when explicitly needed:
+
+```powershell
+python csv_interval_matcher.py --short "short.csv" --long "long.csv" `
+  --top 1 `
+  --plot-output "matched_overlay.png"
+```
+
+The overlay uses the matched long time as the bottom x-axis and maps short time with
+`long_time = match_start + (short_time - short_start)`. The left y-axis shows the full
+long signal, the right y-axis shows the aligned short signals, and the matched windows
+are lightly shaded on the long timeline. For multiple selected matches, pass a folder
+to `--plot-output` if you also want PNG files for more than one metric.
 
 If a CSV timestamp column has lost sub-second precision, synthesize the time axis from
 row index and the known sampling rate:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 import math
 from pathlib import Path
 
@@ -9,6 +11,18 @@ from matplotlib.ticker import MaxNLocator
 
 PLOT_FIGSIZE = (10, 6)
 PLOT_DPI = 100
+
+
+@dataclass(frozen=True)
+class MatchOverlaySeries:
+    name: str
+    aligned_times: Sequence[float]
+    values: Sequence[float]
+    y_label: str
+    start_time: float
+    end_time: float
+    rank: int
+    score: float
 
 
 def _point_columns(rows: list[dict[str, float]]) -> tuple[str, str]:
@@ -44,6 +58,21 @@ def _expanded_bounds(values: list[float]) -> tuple[float, float]:
 
     padding = abs(lower) * 0.03 if lower else 1.0
     return lower - padding, upper + padding
+
+
+def _finite_xy(
+    xs: Sequence[float],
+    ys: Sequence[float],
+) -> tuple[list[float], list[float]]:
+    finite_xs: list[float] = []
+    finite_ys: list[float] = []
+    for x, y in zip(xs, ys):
+        x_value = float(x)
+        y_value = float(y)
+        if math.isfinite(x_value) and math.isfinite(y_value):
+            finite_xs.append(x_value)
+            finite_ys.append(y_value)
+    return finite_xs, finite_ys
 
 
 def write_line_plot(plot_path: Path | None, rows: list[dict[str, float]]) -> None:
@@ -90,6 +119,237 @@ def write_line_plot(plot_path: Path | None, rows: list[dict[str, float]]) -> Non
             plot_path.parent.mkdir(parents=True, exist_ok=True)
             figure.savefig(plot_path, format="png")
         plt.show()
+    finally:
+        plt.close(figure)
+
+
+def write_dual_axis_match_overlay_plot(
+    plot_path: Path | None,
+    *,
+    long_times: Sequence[float],
+    long_values: Sequence[float],
+    short_matches: Sequence[MatchOverlaySeries],
+    long_name: str,
+    long_x_label: str,
+    long_y_label: str,
+    metric: str,
+    show: bool = False,
+) -> None:
+    long_xs, long_ys = _finite_xy(long_times, long_values)
+    if not long_xs:
+        raise RuntimeError("No finite long CSV points are available for plotting")
+
+    prepared_matches: list[tuple[MatchOverlaySeries, list[float], list[float]]] = []
+    for match in short_matches:
+        short_xs, short_ys = _finite_xy(match.aligned_times, match.values)
+        if short_xs:
+            prepared_matches.append((match, short_xs, short_ys))
+    if not prepared_matches:
+        raise RuntimeError("No finite matched short CSV points are available for plotting")
+
+    x_min, x_max = _expanded_bounds(long_xs)
+    long_y_min, long_y_max = _expanded_bounds(long_ys)
+    short_values_all = [
+        value
+        for _, _, short_ys in prepared_matches
+        for value in short_ys
+    ]
+    short_y_min, short_y_max = _expanded_bounds(short_values_all)
+
+    long_color = "#1f5f9e"
+    short_colors = [
+        "#c2571a",
+        "#178a63",
+        "#7b4ab8",
+        "#b33c60",
+        "#8a6f12",
+        "#156f7a",
+    ]
+    short_y_labels = sorted({match.y_label for match, _, _ in prepared_matches})
+    if len(short_y_labels) == 1:
+        short_y_label = f"short {short_y_labels[0]}"
+    else:
+        short_y_label = "short signal"
+
+    figure, axis = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
+    try:
+        if figure.canvas.manager is not None:
+            figure.canvas.manager.set_window_title("Matched CSV Overlay")
+        figure.patch.set_facecolor("white")
+        axis.set_facecolor("#fbfcfe")
+
+        short_axis = axis.twinx()
+        long_line = axis.plot(
+            long_xs,
+            long_ys,
+            color=long_color,
+            linewidth=1.5,
+            alpha=0.82,
+            label=f"long: {long_name}",
+        )
+
+        short_lines = []
+        for index, (match, short_xs, short_ys) in enumerate(prepared_matches):
+            color = short_colors[index % len(short_colors)]
+            axis.axvspan(match.start_time, match.end_time, color=color, alpha=0.07, linewidth=0)
+            lines = short_axis.plot(
+                short_xs,
+                short_ys,
+                color=color,
+                linewidth=1.8,
+                label=(
+                    f"{match.name} | rank {match.rank} | "
+                    f"{match.start_time:.6g}-{match.end_time:.6g} | {match.score:.4g}"
+                ),
+            )
+            short_lines.extend(lines)
+
+        axis.set_title(
+            f"Matched CSV Overlay on Full Long | metric={metric}",
+            fontsize=14,
+            pad=14,
+        )
+        axis.set_xlabel(f"long {long_x_label}")
+        axis.set_ylabel(f"long {long_y_label}", color=long_color)
+        short_axis.set_ylabel(short_y_label)
+        axis.set_xlim(x_min, x_max)
+        axis.set_ylim(long_y_min, long_y_max)
+        short_axis.set_ylim(short_y_min, short_y_max)
+
+        lines = [*long_line, *short_lines]
+        labels = [line.get_label() for line in lines]
+        axis.legend(lines, labels, loc="best", frameon=False, fontsize=8)
+
+        axis.xaxis.set_major_locator(MaxNLocator(nbins=10))
+        axis.yaxis.set_major_locator(MaxNLocator(nbins=6))
+        short_axis.yaxis.set_major_locator(MaxNLocator(nbins=6))
+        axis.grid(True, color="#dfe4ea", linewidth=0.8)
+
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        axis.spines["left"].set_color(long_color)
+        axis.spines["bottom"].set_color("#38404a")
+        short_axis.spines["top"].set_visible(False)
+        short_axis.spines["right"].set_color("#38404a")
+        axis.tick_params(axis="x", colors="#2e343c", labelsize=9)
+        axis.tick_params(axis="y", colors=long_color, labelsize=9)
+        short_axis.tick_params(axis="y", colors="#2e343c", labelsize=9)
+
+        figure.tight_layout()
+        if plot_path is not None:
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(plot_path, format="png")
+        if show:
+            plt.show()
+    finally:
+        plt.close(figure)
+
+
+def write_dual_axis_match_plot(
+    plot_path: Path | None,
+    *,
+    aligned_times: Sequence[float],
+    long_values: Sequence[float],
+    short_values: Sequence[float],
+    long_name: str,
+    short_name: str,
+    long_x_label: str,
+    short_x_label: str,
+    long_y_label: str,
+    short_y_label: str,
+    match_start_time: float,
+    short_time_origin: float,
+    metric: str,
+    score: float,
+    show: bool = False,
+) -> None:
+    long_xs, long_ys = _finite_xy(aligned_times, long_values)
+    short_xs, short_ys = _finite_xy(aligned_times, short_values)
+    if not long_xs or not short_xs:
+        raise RuntimeError("No finite matched points are available for plotting")
+
+    x_min, x_max = _expanded_bounds([*long_xs, *short_xs])
+    long_y_min, long_y_max = _expanded_bounds(long_ys)
+    short_y_min, short_y_max = _expanded_bounds(short_ys)
+
+    long_color = "#1667be"
+    short_color = "#c2571a"
+
+    figure, axis = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
+    try:
+        if figure.canvas.manager is not None:
+            figure.canvas.manager.set_window_title("Matched CSV Overlay")
+        figure.patch.set_facecolor("white")
+        axis.set_facecolor("#fbfcfe")
+
+        short_axis = axis.twinx()
+        long_line = axis.plot(
+            long_xs,
+            long_ys,
+            color=long_color,
+            linewidth=1.8,
+            label=f"long: {long_name}",
+        )
+        short_line = short_axis.plot(
+            short_xs,
+            short_ys,
+            color=short_color,
+            linewidth=1.8,
+            label=f"short: {short_name}",
+        )
+
+        axis.set_title(
+            f"Matched CSV Overlay | {metric} score={score:.6g}",
+            fontsize=14,
+            pad=14,
+        )
+        axis.set_xlabel(f"long {long_x_label}")
+        axis.set_ylabel(f"long {long_y_label}", color=long_color)
+        short_axis.set_ylabel(f"short {short_y_label}", color=short_color)
+        axis.set_xlim(x_min, x_max)
+        axis.set_ylim(long_y_min, long_y_max)
+        short_axis.set_ylim(short_y_min, short_y_max)
+
+        def to_short_time(long_time: float) -> float:
+            return long_time - match_start_time + short_time_origin
+
+        def to_long_time(short_time: float) -> float:
+            return short_time - short_time_origin + match_start_time
+
+        top_axis = axis.secondary_xaxis(
+            "top",
+            functions=(to_short_time, to_long_time),
+        )
+        top_axis.set_xlabel(f"aligned short {short_x_label}")
+
+        lines = [*long_line, *short_line]
+        labels = [line.get_label() for line in lines]
+        axis.legend(lines, labels, loc="best", frameon=False)
+
+        axis.xaxis.set_major_locator(MaxNLocator(nbins=8))
+        axis.yaxis.set_major_locator(MaxNLocator(nbins=6))
+        short_axis.yaxis.set_major_locator(MaxNLocator(nbins=6))
+        top_axis.xaxis.set_major_locator(MaxNLocator(nbins=8))
+        axis.grid(True, color="#dfe4ea", linewidth=0.8)
+
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        axis.spines["left"].set_color(long_color)
+        axis.spines["bottom"].set_color("#38404a")
+        short_axis.spines["top"].set_visible(False)
+        short_axis.spines["right"].set_color(short_color)
+        top_axis.spines["top"].set_color("#38404a")
+        axis.tick_params(axis="x", colors="#2e343c", labelsize=9)
+        axis.tick_params(axis="y", colors=long_color, labelsize=9)
+        short_axis.tick_params(axis="y", colors=short_color, labelsize=9)
+        top_axis.tick_params(axis="x", colors="#2e343c", labelsize=9)
+
+        figure.tight_layout()
+        if plot_path is not None:
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(plot_path, format="png")
+        if show:
+            plt.show()
     finally:
         plt.close(figure)
 

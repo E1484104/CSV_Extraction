@@ -839,6 +839,91 @@ def write_results(path: Path, results: list[MatchResult]) -> None:
             )
 
 
+def safe_filename_component(text: str) -> str:
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+    cleaned = "".join(character if character in allowed else "_" for character in text)
+    return cleaned.strip("._") or "match"
+
+
+def overlay_plot_filename(metric: str) -> str:
+    return f"matched_overlay_{safe_filename_component(metric)}.png"
+
+
+def match_overlay_plot_path(
+    plot_output: Path | None,
+    *,
+    metric: str,
+    total_groups: int,
+) -> Path | None:
+    if plot_output is None:
+        return None
+    if plot_output.suffix:
+        if total_groups > 1:
+            raise RuntimeError(
+                "--plot-output must be a directory when plots are generated for multiple metrics"
+            )
+        return plot_output
+    return plot_output / overlay_plot_filename(metric)
+
+
+def write_match_plots(
+    plot_requests: list[tuple[ScoredSeries, MatchResult]],
+    long: CsvSeries,
+    args: argparse.Namespace,
+) -> list[Path]:
+    if not plot_requests:
+        return []
+    if args.plot_output is None and args.no_plot:
+        return []
+
+    from plotting import MatchOverlaySeries, write_dual_axis_match_overlay_plot
+
+    grouped_requests: dict[str, list[tuple[ScoredSeries, MatchResult]]] = {}
+    for scored, result in plot_requests:
+        grouped_requests.setdefault(result.metric, []).append((scored, result))
+
+    written_paths: list[Path] = []
+    total_groups = len(grouped_requests)
+    show_plot = not args.no_plot or args.show_plot
+    for metric, requests in grouped_requests.items():
+        plot_path = match_overlay_plot_path(
+            args.plot_output,
+            metric=metric,
+            total_groups=total_groups,
+        )
+        short_matches: list[MatchOverlaySeries] = []
+        for scored, result in requests:
+            short_offsets = scored.short.times - scored.short.times[0]
+            short_values = np.interp(scored.grid_offsets, short_offsets, scored.short.values)
+            short_matches.append(
+                MatchOverlaySeries(
+                    name=scored.short.path.name,
+                    aligned_times=result.start_time + scored.grid_offsets,
+                    values=short_values,
+                    y_label=scored.short.y_column,
+                    start_time=result.start_time,
+                    end_time=result.end_time,
+                    rank=result.rank,
+                    score=result.score,
+                )
+            )
+
+        write_dual_axis_match_overlay_plot(
+            plot_path,
+            long_times=long.times,
+            long_values=long.values,
+            short_matches=short_matches,
+            long_name=long.path.name,
+            long_x_label=long.x_column,
+            long_y_label=long.y_column,
+            metric=metric,
+            show=show_plot,
+        )
+        if plot_path is not None:
+            written_paths.append(plot_path)
+    return written_paths
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Find the long-CSV interval whose waveform best matches shorter CSV data.",
@@ -900,6 +985,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-nearest-gap-s", type=float, help="Reject windows with a larger nearest-time gap.")
     parser.add_argument("--output", type=Path, help="Optional CSV path for the match table.")
+    parser.add_argument(
+        "--plot-output",
+        type=Path,
+        help=(
+            "PNG path for one matched dual-axis overlay, or directory when plotting multiple metrics. "
+            "Uses the full long time axis and aligns every selected short curve onto it."
+        ),
+    )
+    parser.add_argument(
+        "--show-plot",
+        action="store_true",
+        help="Show matched dual-axis Matplotlib windows. This is the default unless --no-plot is used.",
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip showing matched dual-axis Matplotlib windows. --plot-output can still save PNG files.",
+    )
     return parser
 
 
@@ -927,6 +1030,7 @@ def main(argv: list[str] | None = None) -> int:
 
     metrics = metrics_from_args(args)
     all_results: list[MatchResult] = []
+    plot_requests: list[tuple[ScoredSeries, MatchResult]] = []
     if len(scored_items) == 1 or args.independent:
         for scored in scored_items:
             for metric in metrics:
@@ -937,6 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
                     min_start_separation_s=args.min_start_separation_s,
                 )
                 all_results.extend(results)
+                plot_requests.extend((scored, result) for result in results)
                 print()
                 print(format_results(results, compact=args.metric == "all"))
     else:
@@ -947,6 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
                 gap_s=args.ordered_gap_s,
             )
             all_results.extend(results)
+            plot_requests.extend(zip(scored_items, results))
             print()
             print(f"ordered non-overlapping selection | metric={metric}")
             print(format_results(results, compact=args.metric == "all"))
@@ -954,6 +1060,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.output is not None:
         write_results(args.output, all_results)
         print(f"\nwrote {args.output}")
+
+    plot_paths = write_match_plots(plot_requests, long, args)
+    if plot_paths:
+        if len(plot_paths) == 1:
+            print(f"\nwrote match plot {plot_paths[0]}")
+        else:
+            print(f"\nwrote {len(plot_paths)} match plots")
 
     return 0
 
