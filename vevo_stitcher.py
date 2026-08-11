@@ -12,6 +12,10 @@ from config import ROOT_PATH, raw_images_path, stitched_images_path
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+DEFAULT_COLOR_TOLERANCE = 300.0
+BLUE_TRACE_COLOR = (86, 94, 255)
+GREEN_TRACE_COLOR = (86, 255, 94)
+MIN_TRACE_SATURATION = 35.0
 DEFAULT_ROIS_BY_IMAGE_SIZE = {
     # Full-screen Vevo 3100 exports used in the current data sets.
     # This covers the velocity waveform plot area but excludes the lower BPM/RR/C panel.
@@ -118,18 +122,55 @@ def default_roi_for_images(images: list[np.ndarray]) -> tuple[int, int, int, int
     return roi
 
 
-def blue_mask(image: np.ndarray) -> np.ndarray:
+def trace_color_distance_mask(
+    image: np.ndarray,
+    target_color: tuple[int, int, int],
+    tolerance: float,
+    dominant_channel: int,
+) -> np.ndarray:
+    pixels = image.astype(np.float64)
+    target = np.asarray(target_color, dtype=np.float64)
+    distance = np.linalg.norm(pixels - target, axis=2)
+    channel_max = pixels.max(axis=2)
+    channel_min = pixels.min(axis=2)
+    saturation = channel_max - channel_min
+    dominant_slack = max(15.0, float(tolerance) * 0.15)
+    dominant = pixels[:, :, dominant_channel] + dominant_slack >= channel_max
+    return (distance <= tolerance) & (saturation >= MIN_TRACE_SATURATION) & dominant
+
+
+def blue_mask(
+    image: np.ndarray,
+    tolerance: float = DEFAULT_COLOR_TOLERANCE,
+) -> np.ndarray:
     red = image[:, :, 0].astype(np.float64)
     green = image[:, :, 1].astype(np.float64)
     blue = image[:, :, 2].astype(np.float64)
-    return (blue > 120) & (blue > red * 1.25) & (blue > green * 1.05)
+    strict = (blue > 120) & (blue > red * 1.25) & (blue > green * 1.05)
+    tolerant = trace_color_distance_mask(
+        image,
+        target_color=BLUE_TRACE_COLOR,
+        tolerance=tolerance,
+        dominant_channel=2,
+    )
+    return strict | tolerant
 
 
-def green_mask(image: np.ndarray) -> np.ndarray:
+def green_mask(
+    image: np.ndarray,
+    tolerance: float = DEFAULT_COLOR_TOLERANCE,
+) -> np.ndarray:
     red = image[:, :, 0].astype(np.float64)
     green = image[:, :, 1].astype(np.float64)
     blue = image[:, :, 2].astype(np.float64)
-    return (green > 80) & (green > red * 1.35) & (green > blue * 1.35)
+    strict = (green > 80) & (green > red * 1.35) & (green > blue * 1.35)
+    tolerant = trace_color_distance_mask(
+        image,
+        target_color=GREEN_TRACE_COLOR,
+        tolerance=tolerance,
+        dominant_channel=1,
+    )
+    return strict | tolerant
 
 
 def gray_signal_mask(image: np.ndarray, threshold: int) -> np.ndarray:
@@ -168,12 +209,13 @@ def feature_mask(
     feature: str,
     gray_threshold: int,
     static_row_occupancy: float,
+    color_tolerance: float,
 ) -> np.ndarray:
     if feature == "blue":
-        mask = blue_mask(image)
+        mask = blue_mask(image, tolerance=color_tolerance)
         return remove_static_rows(mask, occupancy_threshold=static_row_occupancy)
     if feature == "green":
-        mask = green_mask(image)
+        mask = green_mask(image, tolerance=color_tolerance)
         return remove_static_rows(mask, occupancy_threshold=static_row_occupancy)
 
     if feature == "gray":
@@ -183,11 +225,11 @@ def feature_mask(
         )
 
     blue = remove_static_rows(
-        blue_mask(image),
+        blue_mask(image, tolerance=color_tolerance),
         occupancy_threshold=static_row_occupancy,
     )
     green = remove_static_rows(
-        green_mask(image),
+        green_mask(image, tolerance=color_tolerance),
         occupancy_threshold=static_row_occupancy,
     )
     if blue.sum() >= green.sum():
@@ -195,26 +237,47 @@ def feature_mask(
     return green
 
 
-def curve_mask(image: np.ndarray, feature: str, static_row_occupancy: float) -> np.ndarray:
+def curve_mask(
+    image: np.ndarray,
+    feature: str,
+    static_row_occupancy: float,
+    color_tolerance: float,
+) -> np.ndarray:
     if feature == "blue":
-        return remove_static_rows(blue_mask(image), occupancy_threshold=static_row_occupancy)
+        return remove_static_rows(
+            blue_mask(image, tolerance=color_tolerance),
+            occupancy_threshold=static_row_occupancy,
+        )
     if feature == "green":
-        return remove_static_rows(green_mask(image), occupancy_threshold=static_row_occupancy)
-    blue = remove_static_rows(blue_mask(image), occupancy_threshold=static_row_occupancy)
-    green = remove_static_rows(green_mask(image), occupancy_threshold=static_row_occupancy)
+        return remove_static_rows(
+            green_mask(image, tolerance=color_tolerance),
+            occupancy_threshold=static_row_occupancy,
+        )
+    blue = remove_static_rows(
+        blue_mask(image, tolerance=color_tolerance),
+        occupancy_threshold=static_row_occupancy,
+    )
+    green = remove_static_rows(
+        green_mask(image, tolerance=color_tolerance),
+        occupancy_threshold=static_row_occupancy,
+    )
     if blue.sum() >= green.sum():
         return blue
     return green
 
 
-def raw_curve_mask(image: np.ndarray, feature: str) -> np.ndarray:
+def raw_curve_mask(
+    image: np.ndarray,
+    feature: str,
+    color_tolerance: float,
+) -> np.ndarray:
     if feature == "blue":
-        return blue_mask(image)
+        return blue_mask(image, tolerance=color_tolerance)
     if feature == "green":
-        return green_mask(image)
+        return green_mask(image, tolerance=color_tolerance)
 
-    blue = blue_mask(image)
-    green = green_mask(image)
+    blue = blue_mask(image, tolerance=color_tolerance)
+    green = green_mask(image, tolerance=color_tolerance)
     if blue.sum() >= green.sum():
         return blue
     return green
@@ -224,6 +287,7 @@ def resolve_curve_feature(
     crops: list[np.ndarray],
     feature: str,
     static_row_occupancy: float,
+    color_tolerance: float,
 ) -> str:
     if feature != "auto":
         return feature
@@ -233,13 +297,13 @@ def resolve_curve_feature(
     for crop in crops:
         blue_total += int(
             remove_static_rows(
-                blue_mask(crop),
+                blue_mask(crop, tolerance=color_tolerance),
                 occupancy_threshold=static_row_occupancy,
             ).sum()
         )
         green_total += int(
             remove_static_rows(
-                green_mask(crop),
+                green_mask(crop, tolerance=color_tolerance),
                 occupancy_threshold=static_row_occupancy,
             ).sum()
         )
@@ -292,12 +356,14 @@ def cleanup_preserve_mask(
     feature: str,
     gray_threshold: int,
     static_row_occupancy: float,
+    color_tolerance: float,
 ) -> np.ndarray:
     if feature in {"auto", "blue", "green"}:
         mask = curve_mask(
             image,
             feature=feature,
             static_row_occupancy=static_row_occupancy,
+            color_tolerance=color_tolerance,
         )
         return dilate_mask(mask, radius=1)
     if feature == "gray":
@@ -375,6 +441,7 @@ def auto_roi(
     feature: str,
     gray_threshold: int,
     static_row_occupancy: float,
+    color_tolerance: float,
     x_padding: int,
     y_padding_top: int,
     y_padding_bottom: int,
@@ -385,6 +452,7 @@ def auto_roi(
             feature=feature,
             gray_threshold=gray_threshold,
             static_row_occupancy=static_row_occupancy,
+            color_tolerance=color_tolerance,
         )
         for image in images
     ]
@@ -517,13 +585,13 @@ def stitch_warning(
     return "; ".join(warnings)
 
 
-def seam_check_enabled(mode: str, previous_crop: np.ndarray, current_crop: np.ndarray) -> bool:
+def seam_check_enabled(mode: str, previous_mask: np.ndarray, current_mask: np.ndarray) -> bool:
     if mode == "off":
         return False
     if mode == "on":
         return True
-    previous_count = blue_mask(previous_crop).sum() + green_mask(previous_crop).sum()
-    current_count = blue_mask(current_crop).sum() + green_mask(current_crop).sum()
+    previous_count = previous_mask.sum()
+    current_count = current_mask.sum()
     return previous_count >= 500 and current_count >= 500
 
 
@@ -907,7 +975,7 @@ def stitch_crops(
         connected = True
         seam_horizontal_gap: int | None = None
         seam_vertical_gap: float | None = None
-        if seam_check_enabled(seam_check, crops[accepted_index], crops[candidate_index]):
+        if seam_check_enabled(seam_check, masks[accepted_index], masks[candidate_index]):
             connected, seam_horizontal_gap, seam_vertical_gap = seam_connection(
                 previous_mask=masks[accepted_index],
                 current_mask=masks[candidate_index],
@@ -1113,6 +1181,7 @@ def stitch_image_group(
                 feature=args.feature,
                 gray_threshold=args.gray_threshold,
                 static_row_occupancy=args.static_row_occupancy,
+                color_tolerance=args.tolerance,
                 x_padding=args.x_padding,
                 y_padding_top=(
                     args.y_padding if args.y_padding_top is None else args.y_padding_top
@@ -1127,6 +1196,7 @@ def stitch_image_group(
         crops,
         feature=args.feature,
         static_row_occupancy=args.static_row_occupancy,
+        color_tolerance=args.tolerance,
     )
     masks = [
         feature_mask(
@@ -1134,10 +1204,18 @@ def stitch_image_group(
             feature=curve_feature,
             gray_threshold=args.gray_threshold,
             static_row_occupancy=args.static_row_occupancy,
+            color_tolerance=args.tolerance,
         )
         for crop in crops
     ]
-    output_masks = [raw_curve_mask(crop, feature=curve_feature) for crop in crops]
+    output_masks = [
+        raw_curve_mask(
+            crop,
+            feature=curve_feature,
+            color_tolerance=args.tolerance,
+        )
+        for crop in crops
+    ]
     axis_y = white_axis_y(crops) if args.draw_axis else None
     paths, crops, masks, reversed_order = choose_order(
         paths=paths,
@@ -1257,6 +1335,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "blue", "green"],
         default="auto",
         help="Curve color used for alignment. Default: auto chooses blue or green.",
+    )
+    parser.add_argument(
+        "--tolerance",
+        type=float,
+        default=DEFAULT_COLOR_TOLERANCE,
+        help="RGB color distance tolerance for blue/green trace detection. Default: 150.",
     )
     parser.add_argument(
         "--order",

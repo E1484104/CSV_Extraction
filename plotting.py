@@ -11,6 +11,9 @@ from matplotlib.ticker import MaxNLocator
 
 PLOT_FIGSIZE = (10, 6)
 PLOT_DPI = 100
+MATCH_DETAIL_PANE_LIMIT = 3
+LONG_OVERLAY_ALPHA = 0.88
+SHORT_OVERLAY_ALPHA = 0.55
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,23 @@ def _finite_xy(
             finite_xs.append(x_value)
             finite_ys.append(y_value)
     return finite_xs, finite_ys
+
+
+def _windowed_y_bounds(
+    xs: Sequence[float],
+    ys: Sequence[float],
+    x_min: float,
+    x_max: float,
+    fallback: tuple[float, float],
+) -> tuple[float, float]:
+    window_values = [
+        float(y)
+        for x, y in zip(xs, ys)
+        if x_min <= float(x) <= x_max and math.isfinite(float(y))
+    ]
+    if not window_values:
+        return fallback
+    return _expanded_bounds(window_values)
 
 
 def write_line_plot(plot_path: Path | None, rows: list[dict[str, float]]) -> None:
@@ -171,7 +191,18 @@ def write_dual_axis_match_overlay_plot(
     else:
         short_y_label = "short signal"
 
-    figure, axis = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
+    detail_matches = prepared_matches[:MATCH_DETAIL_PANE_LIMIT]
+    detail_count = max(1, len(detail_matches))
+
+    figure = plt.figure(figsize=(12, 8), dpi=PLOT_DPI)
+    grid = figure.add_gridspec(
+        2,
+        detail_count,
+        height_ratios=[2.25, 1.0],
+        hspace=0.38,
+        wspace=0.34,
+    )
+    axis = figure.add_subplot(grid[0, :])
     try:
         if figure.canvas.manager is not None:
             figure.canvas.manager.set_window_title("Matched CSV Overlay")
@@ -179,13 +210,15 @@ def write_dual_axis_match_overlay_plot(
         axis.set_facecolor("#fbfcfe")
 
         short_axis = axis.twinx()
+        short_axis.patch.set_alpha(0.0)
         long_line = axis.plot(
             long_xs,
             long_ys,
             color=long_color,
             linewidth=1.5,
-            alpha=0.82,
+            alpha=LONG_OVERLAY_ALPHA,
             label=f"long: {long_name}",
+            zorder=2,
         )
 
         short_lines = []
@@ -197,10 +230,12 @@ def write_dual_axis_match_overlay_plot(
                 short_ys,
                 color=color,
                 linewidth=1.8,
+                alpha=SHORT_OVERLAY_ALPHA,
                 label=(
                     f"{match.name} | rank {match.rank} | "
                     f"{match.start_time:.6g}-{match.end_time:.6g} | {match.score:.4g}"
                 ),
+                zorder=3,
             )
             short_lines.extend(lines)
 
@@ -235,7 +270,89 @@ def write_dual_axis_match_overlay_plot(
         axis.tick_params(axis="y", colors=long_color, labelsize=9)
         short_axis.tick_params(axis="y", colors="#2e343c", labelsize=9)
 
-        figure.tight_layout()
+        for index, (match, short_xs, short_ys) in enumerate(detail_matches):
+            detail_axis = figure.add_subplot(grid[1, index])
+            detail_short_axis = detail_axis.twinx()
+            detail_short_axis.patch.set_alpha(0.0)
+            color = short_colors[index % len(short_colors)]
+
+            duration = match.end_time - match.start_time
+            padding = duration * 0.03 if duration > 0 else 1.0
+            detail_x_min = match.start_time - padding
+            detail_x_max = match.end_time + padding
+            detail_long_y_min, detail_long_y_max = _windowed_y_bounds(
+                long_xs,
+                long_ys,
+                detail_x_min,
+                detail_x_max,
+                fallback=(long_y_min, long_y_max),
+            )
+            detail_short_y_min, detail_short_y_max = _windowed_y_bounds(
+                short_xs,
+                short_ys,
+                detail_x_min,
+                detail_x_max,
+                fallback=(short_y_min, short_y_max),
+            )
+
+            detail_axis.set_facecolor("#fbfcfe")
+            detail_axis.plot(
+                long_xs,
+                long_ys,
+                color=long_color,
+                linewidth=1.25,
+                alpha=LONG_OVERLAY_ALPHA,
+                label="long",
+                zorder=2,
+            )
+            detail_short_axis.plot(
+                short_xs,
+                short_ys,
+                color=color,
+                linewidth=1.7,
+                alpha=SHORT_OVERLAY_ALPHA,
+                label="short",
+                zorder=3,
+            )
+            detail_axis.set_title(
+                f"rank {match.rank} | {match.start_time:.6g}-{match.end_time:.6g}",
+                fontsize=9,
+                pad=8,
+            )
+            detail_axis.set_xlim(detail_x_min, detail_x_max)
+            detail_axis.set_ylim(detail_long_y_min, detail_long_y_max)
+            detail_short_axis.set_ylim(detail_short_y_min, detail_short_y_max)
+            detail_axis.set_xlabel(f"long {long_x_label}", fontsize=8)
+            if index == 0:
+                detail_axis.set_ylabel(f"long {long_y_label}", color=long_color, fontsize=8)
+            else:
+                detail_axis.tick_params(axis="y", labelleft=False)
+            if index == len(detail_matches) - 1:
+                detail_short_axis.set_ylabel(short_y_label, fontsize=8)
+            else:
+                detail_short_axis.tick_params(axis="y", labelright=False)
+
+            detail_axis.xaxis.set_major_locator(MaxNLocator(nbins=4))
+            detail_axis.yaxis.set_major_locator(MaxNLocator(nbins=4))
+            detail_short_axis.yaxis.set_major_locator(MaxNLocator(nbins=4))
+            detail_axis.grid(True, color="#dfe4ea", linewidth=0.8)
+
+            detail_axis.spines["top"].set_visible(False)
+            detail_axis.spines["right"].set_visible(False)
+            detail_axis.spines["left"].set_color(long_color)
+            detail_axis.spines["bottom"].set_color("#38404a")
+            detail_short_axis.spines["top"].set_visible(False)
+            detail_short_axis.spines["right"].set_color("#38404a")
+            detail_axis.tick_params(axis="x", colors="#2e343c", labelsize=8)
+            detail_axis.tick_params(axis="y", colors=long_color, labelsize=8)
+            detail_short_axis.tick_params(axis="y", colors="#2e343c", labelsize=8)
+
+        figure.subplots_adjust(
+            left=0.07,
+            right=0.93,
+            top=0.93,
+            bottom=0.08,
+        )
         if plot_path is not None:
             plot_path.parent.mkdir(parents=True, exist_ok=True)
             figure.savefig(plot_path, format="png")
@@ -283,11 +400,13 @@ def write_dual_axis_match_plot(
         axis.set_facecolor("#fbfcfe")
 
         short_axis = axis.twinx()
+        short_axis.patch.set_alpha(0.0)
         long_line = axis.plot(
             long_xs,
             long_ys,
             color=long_color,
             linewidth=1.8,
+            alpha=LONG_OVERLAY_ALPHA,
             label=f"long: {long_name}",
         )
         short_line = short_axis.plot(
@@ -295,6 +414,7 @@ def write_dual_axis_match_plot(
             short_ys,
             color=short_color,
             linewidth=1.8,
+            alpha=SHORT_OVERLAY_ALPHA,
             label=f"short: {short_name}",
         )
 

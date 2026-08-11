@@ -244,10 +244,13 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" `
 ```
 
 The overlay uses the matched long time as the bottom x-axis and maps short time with
-`long_time = match_start + (short_time - short_start)`. The left y-axis shows the full
-long signal, the right y-axis shows the aligned short signals, and the matched windows
-are lightly shaded on the long timeline. For multiple selected matches, pass a folder
-to `--plot-output` if you also want PNG files for more than one metric.
+`long_time = match_start + (short_time - short_start)`. The Matplotlib window shows a
+full-long overlay on top and up to three matched-window detail panes below it. The left
+y-axis shows the full long signal, the right y-axis shows the aligned short signals,
+and each lower detail pane rescales both long and short y-axes to the visible local
+window. Short lines are drawn semi-transparently so the underlying long trace remains
+visible. For multiple selected matches, pass a folder to `--plot-output` if you also
+want PNG files for more than one metric.
 
 If a CSV timestamp column has lost sub-second precision, synthesize the time axis from
 row index and the known sampling rate:
@@ -380,13 +383,19 @@ only when you want to manually cap that search range.
 
 The stitcher detects only blue and green Image Peak traces. The default `--feature auto`
 chooses between those two colors; use `--feature blue` or `--feature green` if the
-automatic choice is not what you want. The default output keeps only the detected curve
-pixels, including horizontal curve segments near the axis, which avoids broken white
-axis fragments in the stitched image.
+automatic choice is not what you want. Blue/green trace detection also uses an RGB
+distance tolerance, defaulting to `150`, so anti-aliased or shifted trace colors are less
+likely to be dropped. Increase `--tolerance` if raw frames still produce broken curve
+segments, or reduce it if same-colored noise is included. The default output keeps only
+the detected curve pixels, including horizontal curve segments near the axis, which
+avoids broken white axis fragments in the stitched image.
 
 ```powershell
 python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
   --feature green
+
+python vevo_stitcher.py --input "frames" --output "stitched_waveform.png" `
+  --tolerance 180
 ```
 
 If you want a continuous horizontal axis, add `--draw-axis`:
