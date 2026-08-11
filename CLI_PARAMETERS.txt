@@ -195,6 +195,8 @@ python ultrasound_normalizer.py --root "../Tester1"
 逐个候选窗口评分，输出最相似的起始时间。
 
 常用命令：
+python csv_interval_matcher.py --root "../20260805/Test22"
+
 python csv_interval_matcher.py --short "../20260805/Test2/Norm_Data/Test2-1.csv" --long "../20260805/Test2/Wearable_2_bpi_processed.csv"
 
 已知多个短 CSV 按文件名排序且互不重叠时：
@@ -210,6 +212,7 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" --top 1
 python csv_interval_matcher.py --short "short.csv" --long "long.csv" --top 1 --plot-output "matched_overlay.png"
 
 默认自动识别：
+- 输入路径：未传 --short/--short-dir 时使用 ROOT_PATH/Norm_Data；未传 --long/--long-dir 时使用 ROOT_PATH/BPI_Processed 中唯一的 CSV。
 - 时间列：time_s、x_norm、x_value、x_px、Timestamp。
 - 数值列：bpi_normalized、y_norm、y_value、y_px、BPI。
 
@@ -220,12 +223,17 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" --top 1 --p
 - 对比图中，底部 x 轴是完整 long 时间；short 通过 long_time = match_start + (short_time - short_start) 映射到同一条时间轴。
 - 对比图窗口上方是完整 long 叠加图，下方最多 3 张匹配窗口分块细节图；下方细节图会分别按局部可见窗口缩放 long/short 的 y 轴范围。
 - 对比图使用双 y 轴：左侧是完整 long 数值列，右侧是所有 short 数值列，匹配窗口会用淡色背景标出；short 线半透明显示，方便看清下方 long 线。
-- 默认 metric=fusion，融合平滑 Pearson、普通 Pearson、Spearman、平滑导数相关和形态特征相关；raw 归一化 MAE/RMSE、Bland-Altman 等绝对数值指标仍可单独查看，但不再进入默认 fusion 分数。
+- 默认 metric=fusion，基于 Test11/Test22 模式调参，融合普通 Pearson、平滑导数相关、平滑 Pearson 和少量形态特征相关；raw 归一化 MAE/RMSE、Bland-Altman 等绝对数值指标仍可单独查看，但不进入默认 fusion 分数。
 - score 越高表示波形越相像；rmse_z、mae_abs、rmse_abs 越低表示误差越小。
 
 常用参数：
+- --root：实验根目录；用于缺省 short 和 long 路径。
 - --short：输入单个短 CSV。
 - --short-dir：输入短 CSV 文件夹，按文件名字典序处理。
+- --short-pattern：short-dir 下匹配的 CSV 文件名模式，默认 *.csv。
+- --long：输入单个长 CSV。
+- --long-dir：输入长 CSV 所在文件夹，默认 ROOT_PATH/BPI_Processed；目录中必须只有一个匹配的 CSV，或用 --long-pattern 缩小范围。
+- --long-pattern：long-dir 下匹配的 CSV 文件名模式，默认 *.csv。
 - --short-x-column / --short-y-column：指定短 CSV 的时间列和数值列。
 - --long-x-column / --long-y-column：指定长 CSV 的时间列和数值列。
 - --metric：选择 fusion、fusion_derivative、pearson、spearman、rmse_z、mae_z、rmse_abs、mae_abs、bland_altman、bland_altman_abs、bias_abs、derivative、smooth_pearson、smooth_derivative、sign_agreement、feature_corr，或 all。

@@ -13,6 +13,7 @@ RAW_IMAGES_DIRNAME = "Raw_Images"
 STITCHED_IMAGES_DIRNAME = "Stitched_Images"
 RAW_DATA_DIRNAME = "Raw_Data"
 NORM_DATA_DIRNAME = "Norm_Data"
+BPI_PROCESSED_DIRNAME = "BPI_Processed"
 
 
 def raw_images_path(root_path: Path = ROOT_PATH) -> Path:
@@ -31,10 +32,15 @@ def norm_data_path(root_path: Path = ROOT_PATH) -> Path:
     return root_path / NORM_DATA_DIRNAME
 
 
+def bpi_processed_path(root_path: Path = ROOT_PATH) -> Path:
+    return root_path / BPI_PROCESSED_DIRNAME
+
+
 RAW_IMAGES_PATH = raw_images_path()
 STITCHED_IMAGES_PATH = stitched_images_path()
 RAW_DATA_PATH = raw_data_path()
 NORM_DATA_PATH = norm_data_path()
+BPI_PROCESSED_PATH = bpi_processed_path()
 
 # Defaults for main.py: stitched PNGs/WAVs -> raw CSV data.
 INPUT_PATH = STITCHED_IMAGES_PATH

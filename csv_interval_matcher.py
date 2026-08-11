@@ -9,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
+from config import ROOT_PATH, bpi_processed_path, norm_data_path
+
 
 ROW_INDEX_COLUMN_NAMES = {"row_index", "index", "__index__"}
 DEFAULT_X_CANDIDATES = [
@@ -237,13 +239,33 @@ def short_paths_from_args(args: argparse.Namespace) -> list[Path]:
     if args.short is not None:
         return [args.short]
     if args.short_dir is None:
-        raise RuntimeError("Provide either --short or --short-dir")
+        args.short_dir = norm_data_path(args.root)
     if not args.short_dir.is_dir():
         raise RuntimeError(f"--short-dir is not a directory: {args.short_dir}")
     paths = sorted(path for path in args.short_dir.glob(args.short_pattern) if path.is_file())
     if not paths:
         raise RuntimeError(f"No short CSV files found in {args.short_dir}")
     return paths
+
+
+def long_path_from_args(args: argparse.Namespace) -> Path:
+    if args.long is not None:
+        return args.long
+
+    long_dir = args.long_dir or bpi_processed_path(args.root)
+    if not long_dir.is_dir():
+        raise RuntimeError(f"--long-dir is not a directory: {long_dir}")
+
+    paths = sorted(path for path in long_dir.glob(args.long_pattern) if path.is_file())
+    if not paths:
+        raise RuntimeError(f"No long CSV files found in {long_dir}")
+    if len(paths) > 1:
+        candidates = ", ".join(path.name for path in paths)
+        raise RuntimeError(
+            "Multiple long CSV files were found in "
+            f"{long_dir}: {candidates}. Use --long to choose one explicitly."
+        )
+    return paths[0]
 
 
 def zscore(values: np.ndarray) -> np.ndarray | None:
@@ -481,11 +503,10 @@ def score_from_diagnostics(metric: str, diagnostics: WindowDiagnostics) -> float
         )
     if metric == "fusion":
         return (
-            0.437500 * safe(diagnostics.smooth_pearson)
-            + 0.187500 * safe(diagnostics.pearson)
-            + 0.125000 * safe(diagnostics.spearman)
-            + 0.187500 * safe(diagnostics.smooth_derivative)
-            + 0.062500 * safe(diagnostics.feature_corr)
+            0.222222 * safe(diagnostics.smooth_pearson)
+            + 0.333333 * safe(diagnostics.pearson)
+            + 0.333333 * safe(diagnostics.smooth_derivative)
+            + 0.111112 * safe(diagnostics.feature_corr)
         )
     raise RuntimeError(f"Unsupported metric: {metric}")
 
@@ -682,6 +703,7 @@ def metrics_from_args(args: argparse.Namespace) -> list[str]:
 
 def read_inputs(args: argparse.Namespace) -> tuple[list[CsvSeries], CsvSeries]:
     short_paths = short_paths_from_args(args)
+    long_path = long_path_from_args(args)
     short_items = [
         read_series(
             path,
@@ -692,7 +714,7 @@ def read_inputs(args: argparse.Namespace) -> tuple[list[CsvSeries], CsvSeries]:
         for path in short_paths
     ]
     long = read_series(
-        args.long,
+        long_path,
         x_column=args.long_x_column,
         y_column=args.long_y_column,
         sample_rate_hz=args.long_sample_rate,
@@ -928,11 +950,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Find the long-CSV interval whose waveform best matches shorter CSV data.",
     )
-    short_input = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=ROOT_PATH,
+        help=(
+            "Experiment root folder. Used for omitted --short/--short-dir and "
+            f"--long/--long-dir. Default: {ROOT_PATH}"
+        ),
+    )
+    short_input = parser.add_mutually_exclusive_group()
     short_input.add_argument("--short", type=Path, help="Short CSV path.")
-    short_input.add_argument("--short-dir", type=Path, help="Folder of short CSV files, processed in sorted order.")
-    parser.add_argument("--short-pattern", default="*.csv", help="Filename pattern for --short-dir. Default: *.csv.")
-    parser.add_argument("--long", type=Path, required=True, help="Long CSV path.")
+    short_input.add_argument(
+        "--short-dir",
+        type=Path,
+        help="Folder of short CSV files, processed in sorted order. Default: ROOT/Norm_Data.",
+    )
+    parser.add_argument(
+        "--short-pattern",
+        default="*.csv",
+        help="Filename pattern for --short-dir. Default: *.csv.",
+    )
+    long_input = parser.add_mutually_exclusive_group()
+    long_input.add_argument("--long", type=Path, help="Long CSV path.")
+    long_input.add_argument(
+        "--long-dir",
+        type=Path,
+        help="Folder containing exactly one long CSV. Default: ROOT/BPI_Processed.",
+    )
+    parser.add_argument(
+        "--long-pattern",
+        default="*.csv",
+        help="Filename pattern for --long-dir. Default: *.csv.",
+    )
     parser.add_argument("--short-x-column", help="Short CSV time/x column. Use row_index to synthesize time from rows.")
     parser.add_argument("--short-y-column", help="Short CSV signal/y column.")
     parser.add_argument("--long-x-column", help="Long CSV time/x column. Use row_index to synthesize time from rows.")

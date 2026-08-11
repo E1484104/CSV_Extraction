@@ -185,6 +185,13 @@ short CSV. It slides the short CSV's relative time axis over the long CSV, sampl
 long CSV at the shifted short timestamps, scores each candidate window, and prints the
 top start times.
 
+By default, it reads short CSV files from `ROOT/Norm_Data` and picks the only CSV in
+`ROOT/BPI_Processed` as the long CSV:
+
+```powershell
+python csv_interval_matcher.py --root "../20260805/Test22"
+```
+
 ```powershell
 python csv_interval_matcher.py `
   --short "../20260805/Test2/Norm_Data/Test2-1.csv" `
@@ -193,11 +200,11 @@ python csv_interval_matcher.py `
 
 By default it auto-detects time columns from `time_s`, `x_norm`, `x_value`, `x_px`,
 or `Timestamp`, and signal columns from `bpi_normalized`, `y_norm`, `y_value`, `y_px`,
-or `BPI`. The default `fusion` metric combines smoothed Pearson correlation,
-ordinary Pearson correlation, Spearman correlation, smoothed derivative correlation,
-a low-dimensional morphology feature correlation. Absolute-value diagnostics such
-as raw normalized MAE/RMSE and Bland-Altman width remain available as standalone
-metrics, but they are no longer part of the default fusion score.
+or `BPI`. The default `fusion` metric is tuned on the Test11/Test22-style data and
+combines ordinary Pearson correlation, smoothed derivative correlation, smoothed
+Pearson correlation, and a small morphology feature-correlation term. Absolute-value
+diagnostics such as raw normalized MAE/RMSE and Bland-Altman width remain available as
+standalone metrics, but they are not part of the default fusion score.
 
 For multiple short CSVs known to be in sorted order, pass the folder. The tool then
 selects one ordered, non-overlapping interval for each short CSV:
@@ -207,6 +214,9 @@ python csv_interval_matcher.py `
   --short-dir "../20260805/Test2/Norm_Data" `
   --long "../20260805/Test2/Wearable_2_bpi_processed.csv"
 ```
+
+If `ROOT/BPI_Processed` contains more than one CSV, pass `--long` directly or narrow the
+folder scan with `--long-dir` and `--long-pattern`.
 
 Compare all available metrics:
 
