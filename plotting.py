@@ -187,7 +187,7 @@ def write_dual_axis_match_overlay_plot(
     ]
     short_y_labels = sorted({match.y_label for match, _, _ in prepared_matches})
     if len(short_y_labels) == 1:
-        short_y_label = f"short {short_y_labels[0]}"
+        short_y_label = f"Normalized Ultrasound Data"
     else:
         short_y_label = "short signal"
 
@@ -217,7 +217,7 @@ def write_dual_axis_match_overlay_plot(
             color=long_color,
             linewidth=1.5,
             alpha=LONG_OVERLAY_ALPHA,
-            label=f"long: {long_name}",
+            label=f"Wearable Data",
             zorder=2,
         )
 
@@ -232,7 +232,7 @@ def write_dual_axis_match_overlay_plot(
                 linewidth=1.8,
                 alpha=SHORT_OVERLAY_ALPHA,
                 label=(
-                    f"{match.name} | rank {match.rank} | "
+                    f"Ultrasound Data | phase {match.rank} | "
                     f"{match.start_time:.6g}-{match.end_time:.6g} | {match.score:.4g}"
                 ),
                 zorder=3,
@@ -240,12 +240,12 @@ def write_dual_axis_match_overlay_plot(
             short_lines.extend(lines)
 
         axis.set_title(
-            f"Matched CSV Overlay on Full Long | metric={metric}",
+            f"Matched Sample Interval | metric={metric}",
             fontsize=14,
             pad=14,
         )
-        axis.set_xlabel(f"long {long_x_label}")
-        axis.set_ylabel(f"long {long_y_label}", color=long_color)
+        axis.set_xlabel(f"Sample Time (s)")
+        axis.set_ylabel(f"Normalized Wearable Data", color=long_color)
         short_axis.set_ylabel(short_y_label)
         axis.set_xlim(x_min, x_max)
         axis.set_ylim(long_y_min, long_y_max)
@@ -315,16 +315,16 @@ def write_dual_axis_match_overlay_plot(
                 zorder=3,
             )
             detail_axis.set_title(
-                f"rank {match.rank} | {match.start_time:.6g}-{match.end_time:.6g}",
+                f"phase {match.rank} | {match.start_time:.6g}-{match.end_time:.6g}",
                 fontsize=9,
                 pad=8,
             )
             detail_axis.set_xlim(detail_x_min, detail_x_max)
             detail_axis.set_ylim(detail_long_y_min, detail_long_y_max)
             detail_short_axis.set_ylim(detail_short_y_min, detail_short_y_max)
-            detail_axis.set_xlabel(f"long {long_x_label}", fontsize=8)
+            detail_axis.set_xlabel(f"Sample Time (s)", fontsize=8)
             if index == 0:
-                detail_axis.set_ylabel(f"long {long_y_label}", color=long_color, fontsize=8)
+                detail_axis.set_ylabel(f"Normalized Wearable Data", color=long_color, fontsize=8)
             else:
                 detail_axis.tick_params(axis="y", labelleft=False)
             if index == len(detail_matches) - 1:
@@ -407,7 +407,7 @@ def write_dual_axis_match_plot(
             color=long_color,
             linewidth=1.8,
             alpha=LONG_OVERLAY_ALPHA,
-            label=f"long: {long_name}",
+            label=f"Wearable Data",
         )
         short_line = short_axis.plot(
             short_xs,
@@ -415,7 +415,7 @@ def write_dual_axis_match_plot(
             color=short_color,
             linewidth=1.8,
             alpha=SHORT_OVERLAY_ALPHA,
-            label=f"short: {short_name}",
+            label=f"Ultrasound Data",
         )
 
         axis.set_title(
