@@ -69,9 +69,9 @@ seam 检查与跳帧恢复：
 - --static-row-occupancy：超过该占比的行视为静态横线并忽略，默认 0.35。
 
 
-2. main.py：图片/WAV 提取 CSV
------------------------------
-用途：从拼接后的图片提取曲线 CSV；也可从 WAV 提取多普勒频谱外缘 CSV。
+2. main.py：图片提取 CSV
+------------------------
+用途：从拼接后的图片提取曲线 CSV。
 
 常用命令：
 python main.py --root "../Tester1" --no-plot
@@ -82,7 +82,7 @@ python main.py --root "../Tester1" --no-plot
 
 路径与绘图：
 - --root：实验根目录。
-- --input：输入图片、WAV、图片文件夹或 WAV 文件夹。
+- --input：输入图片或图片文件夹。
 - --output：输出 CSV 文件路径，或批量处理时的输出文件夹。
 - --plot-output：保存绘图 PNG 的路径或文件夹；设置后会自动保存图。
 - --save-plot：自动保存图，同时仍显示 Matplotlib 窗口。
@@ -108,25 +108,6 @@ python main.py --root "../Tester1" --no-plot
 - --x-max：真实 x 轴最大值。
 - --y-min：真实 y 轴最小值。
 - --y-max：真实 y 轴最大值。
-
-WAV 频谱外缘提取：
-- --wav-stft-window：STFT 窗口长度，默认 2048。
-- --wav-stft-hop：STFT hop 长度，默认 256。
-- --wav-min-frequency：WAV 分析最低频率，默认 100 Hz。
-- --wav-max-frequency：WAV 分析最高频率，默认 8000 Hz。
-- --wav-noise-percentile：按频率估计噪声底的百分位，默认 20。
-- --wav-threshold-db：有效频谱需高于白化噪声底的 dB 阈值，默认 8。
-- --wav-rolloff-percentile：谱滚降百分位，用于估计频谱外缘，默认 95。
-- --wav-min-consecutive-bins：有效频带至少连续的频率 bin 数，默认 3。
-- --wav-min-run-energy-fraction：保留有效频带所需的相对能量比例，默认 0.05。
-- --wav-median-window：WAV 结果中值滤波窗口，默认 7。
-- --wav-smooth-window：WAV 结果轻微平滑窗口，默认 3。
-- --wav-fill-gaps：最多插值填补多少个连续空窗，默认 2。
-- --wav-max-jump-hz：允许的一帧最大频率跳变；不填则自动，设为 0 可关闭跳变剔除。
-- --wav-min-confidence：接受 WAV 检测点的最低置信度，默认 0.05。
-- --wav-plot-start：WAV 图显示起始时间，默认 0 秒。
-- --wav-plot-duration：WAV 图显示时长，默认 1.1 秒。
-
 
 3. wearable_normalizer.py：Wearable BPI CSV 归一化绘图
 -----------------------------------------------------

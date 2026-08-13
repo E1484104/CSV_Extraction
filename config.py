@@ -42,7 +42,7 @@ RAW_DATA_PATH = raw_data_path()
 NORM_DATA_PATH = norm_data_path()
 BPI_PROCESSED_PATH = bpi_processed_path()
 
-# Defaults for main.py: stitched PNGs/WAVs -> raw CSV data.
+# Defaults for main.py: stitched images -> raw CSV data.
 INPUT_PATH = STITCHED_IMAGES_PATH
 OUTPUT_PATH = RAW_DATA_PATH
 
