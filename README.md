@@ -255,7 +255,7 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" `
 
 The overlay uses the matched long time as the bottom x-axis and maps short time with
 `long_time = match_start + (short_time - short_start)`. The Matplotlib window shows a
-full-long overlay on top and up to three matched-window detail panes below it. The left
+full-long overlay on top and up to four matched-window detail panes below it. The left
 y-axis shows the full long signal, the right y-axis shows the aligned short signals,
 and each lower detail pane rescales both long and short y-axes to the visible local
 window. Short lines are drawn semi-transparently so the underlying long trace remains
