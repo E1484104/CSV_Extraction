@@ -110,11 +110,64 @@ def score_component(pixels: np.ndarray, roi_width: int, roi_height: int) -> Comp
     )
 
 
+def horizontal_gap(
+    first_min_x: int,
+    first_max_x: int,
+    second_min_x: int,
+    second_max_x: int,
+) -> int:
+    if first_max_x < second_min_x:
+        return second_min_x - first_max_x - 1
+    if second_max_x < first_min_x:
+        return first_min_x - second_max_x - 1
+    return 0
+
+
+def merge_component_fragments(
+    components: list[Component],
+    seed: Component,
+    roi_width: int,
+    roi_height: int,
+    max_gap: int,
+) -> Component:
+    selected = [seed]
+    remaining = [component for component in components if component is not seed]
+    min_x = seed.min_x
+    max_x = seed.max_x
+    max_gap = max(0, max_gap)
+
+    changed = True
+    while changed:
+        changed = False
+        still_remaining: list[Component] = []
+        for component in remaining:
+            gap = horizontal_gap(min_x, max_x, component.min_x, component.max_x)
+            extends_trace = component.min_x < min_x or component.max_x > max_x
+            if gap <= max_gap and extends_trace:
+                selected.append(component)
+                min_x = min(min_x, component.min_x)
+                max_x = max(max_x, component.max_x)
+                changed = True
+            else:
+                still_remaining.append(component)
+        remaining = still_remaining
+
+    if len(selected) == 1:
+        return seed
+
+    return score_component(
+        np.concatenate([component.pixels for component in selected], axis=0),
+        roi_width,
+        roi_height,
+    )
+
+
 def select_component(
     mask: np.ndarray,
     min_area: int,
     min_span_ratio: float,
     allow_flat: bool,
+    component_merge_gap: int,
 ) -> Component:
     components = connected_components(mask, min_area=min_area)
     if not components:
@@ -136,7 +189,14 @@ def select_component(
     if not candidates:
         candidates = scored
 
-    return max(candidates, key=lambda component: component.score)
+    seed = max(candidates, key=lambda component: component.score)
+    return merge_component_fragments(
+        components=scored,
+        seed=seed,
+        roi_width=width,
+        roi_height=height,
+        max_gap=component_merge_gap,
+    )
 
 
 def auto_candidate_colors(
@@ -194,13 +254,20 @@ def choose_mask_and_color(
     min_area: int,
     min_span_ratio: float,
     allow_flat: bool,
+    component_merge_gap: int,
     min_brightness: int,
     min_saturation: int,
     auto_candidates: int,
 ) -> tuple[np.ndarray, tuple[int, int, int], Component]:
     if target_color is not None:
         mask = build_mask_for_color(rgb, target_color, tolerance, min_neighbors)
-        component = select_component(mask, min_area, min_span_ratio, allow_flat)
+        component = select_component(
+            mask,
+            min_area,
+            min_span_ratio,
+            allow_flat,
+            component_merge_gap,
+        )
         return mask, target_color, component
 
     best: tuple[np.ndarray, tuple[int, int, int], Component] | None = None
@@ -212,7 +279,13 @@ def choose_mask_and_color(
     ):
         mask = build_mask_for_color(rgb, color, tolerance, min_neighbors)
         try:
-            component = select_component(mask, min_area, min_span_ratio, allow_flat)
+            component = select_component(
+                mask,
+                min_area,
+                min_span_ratio,
+                allow_flat,
+                component_merge_gap,
+            )
         except RuntimeError:
             continue
         if best is None or component.score > best[2].score:
@@ -317,6 +390,7 @@ def extract_curve(image_path: Path, args: argparse.Namespace) -> ExtractResult:
         min_area=args.min_area,
         min_span_ratio=args.min_span_ratio,
         allow_flat=args.allow_flat,
+        component_merge_gap=getattr(args, "component_merge_gap", 8),
         min_brightness=args.min_brightness,
         min_saturation=args.min_saturation,
         auto_candidates=args.auto_candidates,

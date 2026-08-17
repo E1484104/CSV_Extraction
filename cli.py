@@ -102,6 +102,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove colored pixels with fewer than this many colored neighbors. Default: 1.",
     )
     parser.add_argument(
+        "--component-merge-gap",
+        type=int,
+        default=8,
+        help=(
+            "Merge selected same-color curve fragments when their x ranges overlap or are "
+            "within this many empty columns. Default: 8."
+        ),
+    )
+    parser.add_argument(
         "--allow-flat",
         action="store_true",
         help="Allow nearly horizontal components to win automatic selection.",
