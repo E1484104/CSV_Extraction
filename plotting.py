@@ -26,6 +26,8 @@ class MatchOverlaySeries:
     end_time: float
     rank: int
     score: float
+    matched_long_times: Sequence[float] | None = None
+    matched_long_values: Sequence[float] | None = None
 
 
 def _point_columns(rows: list[dict[str, float]]) -> tuple[str, str]:
@@ -153,17 +155,29 @@ def write_dual_axis_match_overlay_plot(
     long_x_label: str,
     long_y_label: str,
     metric: str,
+    plot_mode: str = "raw",
     show: bool = False,
 ) -> None:
     long_xs, long_ys = _finite_xy(long_times, long_values)
     if not long_xs:
         raise RuntimeError("No finite long CSV points are available for plotting")
 
-    prepared_matches: list[tuple[MatchOverlaySeries, list[float], list[float]]] = []
+    prepared_matches: list[
+        tuple[MatchOverlaySeries, list[float], list[float], list[float], list[float]]
+    ] = []
     for match in short_matches:
         short_xs, short_ys = _finite_xy(match.aligned_times, match.values)
         if short_xs:
-            prepared_matches.append((match, short_xs, short_ys))
+            matched_long_xs: list[float] = []
+            matched_long_ys: list[float] = []
+            if match.matched_long_times is not None and match.matched_long_values is not None:
+                matched_long_xs, matched_long_ys = _finite_xy(
+                    match.matched_long_times,
+                    match.matched_long_values,
+                )
+            prepared_matches.append(
+                (match, short_xs, short_ys, matched_long_xs, matched_long_ys)
+            )
     if not prepared_matches:
         raise RuntimeError("No finite matched short CSV points are available for plotting")
 
@@ -171,7 +185,7 @@ def write_dual_axis_match_overlay_plot(
     long_y_min, long_y_max = _expanded_bounds(long_ys)
     short_values_all = [
         value
-        for _, _, short_ys in prepared_matches
+        for _, _, short_ys, _, _ in prepared_matches
         for value in short_ys
     ]
     short_y_min, short_y_max = _expanded_bounds(short_values_all)
@@ -185,7 +199,7 @@ def write_dual_axis_match_overlay_plot(
         "#8a6f12",
         "#156f7a",
     ]
-    short_y_labels = sorted({match.y_label for match, _, _ in prepared_matches})
+    short_y_labels = sorted({match.y_label for match, _, _, _, _ in prepared_matches})
     if len(short_y_labels) == 1:
         short_y_label = f"Normalized Ultrasound Data"
     else:
@@ -222,9 +236,24 @@ def write_dual_axis_match_overlay_plot(
         )
 
         short_lines = []
-        for index, (match, short_xs, short_ys) in enumerate(prepared_matches):
+        for index, (
+            match,
+            short_xs,
+            short_ys,
+            matched_long_xs,
+            matched_long_ys,
+        ) in enumerate(prepared_matches):
             color = short_colors[index % len(short_colors)]
             axis.axvspan(match.start_time, match.end_time, color=color, alpha=0.07, linewidth=0)
+            if matched_long_xs:
+                axis.plot(
+                    matched_long_xs,
+                    matched_long_ys,
+                    color=long_color,
+                    linewidth=1.9,
+                    alpha=0.48,
+                    zorder=3,
+                )
             lines = short_axis.plot(
                 short_xs,
                 short_ys,
@@ -239,11 +268,10 @@ def write_dual_axis_match_overlay_plot(
             )
             short_lines.extend(lines)
 
-        axis.set_title(
-            f"Matched Sample Interval | metric={metric}",
-            fontsize=14,
-            pad=14,
-        )
+        title = f"Matched Sample Interval | metric={metric}"
+        if plot_mode != "raw":
+            title += f" | plot={plot_mode}"
+        axis.set_title(title, fontsize=14, pad=14)
         axis.set_xlabel(f"Sample Time (s)")
         axis.set_ylabel(f"Normalized Wearable Data", color=long_color)
         short_axis.set_ylabel(short_y_label)
@@ -270,19 +298,27 @@ def write_dual_axis_match_overlay_plot(
         axis.tick_params(axis="y", colors=long_color, labelsize=9)
         short_axis.tick_params(axis="y", colors="#2e343c", labelsize=9)
 
-        for index, (match, short_xs, short_ys) in enumerate(detail_matches):
+        for index, (
+            match,
+            short_xs,
+            short_ys,
+            matched_long_xs,
+            matched_long_ys,
+        ) in enumerate(detail_matches):
             detail_axis = figure.add_subplot(grid[1, index])
             detail_short_axis = detail_axis.twinx()
             detail_short_axis.patch.set_alpha(0.0)
             color = short_colors[index % len(short_colors)]
+            detail_long_xs = matched_long_xs or long_xs
+            detail_long_ys = matched_long_ys or long_ys
 
             duration = match.end_time - match.start_time
             padding = duration * 0.03 if duration > 0 else 1.0
             detail_x_min = match.start_time - padding
             detail_x_max = match.end_time + padding
             detail_long_y_min, detail_long_y_max = _windowed_y_bounds(
-                long_xs,
-                long_ys,
+                detail_long_xs,
+                detail_long_ys,
                 detail_x_min,
                 detail_x_max,
                 fallback=(long_y_min, long_y_max),
@@ -297,8 +333,8 @@ def write_dual_axis_match_overlay_plot(
 
             detail_axis.set_facecolor("#fbfcfe")
             detail_axis.plot(
-                long_xs,
-                long_ys,
+                detail_long_xs,
+                detail_long_ys,
                 color=long_color,
                 linewidth=1.25,
                 alpha=LONG_OVERLAY_ALPHA,
@@ -352,6 +388,159 @@ def write_dual_axis_match_overlay_plot(
             right=0.93,
             top=0.93,
             bottom=0.08,
+        )
+        if plot_path is not None:
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(plot_path, format="png")
+        if show:
+            plt.show()
+    finally:
+        plt.close(figure)
+
+
+def write_paired_match_points_plot(
+    plot_path: Path | None,
+    *,
+    matches: Sequence[MatchOverlaySeries],
+    metric: str,
+    sample_method: str,
+    show: bool = False,
+) -> None:
+    prepared: list[tuple[MatchOverlaySeries, list[float], list[float], list[float]]] = []
+    for match in matches:
+        if match.matched_long_values is None:
+            continue
+        xs: list[float] = []
+        short_ys: list[float] = []
+        long_ys: list[float] = []
+        for x, short_y, long_y in zip(
+            match.aligned_times,
+            match.values,
+            match.matched_long_values,
+        ):
+            x_value = float(x)
+            short_value = float(short_y)
+            long_value = float(long_y)
+            if (
+                math.isfinite(x_value)
+                and math.isfinite(short_value)
+                and math.isfinite(long_value)
+            ):
+                xs.append(x_value)
+                short_ys.append(short_value)
+                long_ys.append(long_value)
+        if xs:
+            prepared.append((match, xs, short_ys, long_ys))
+
+    if not prepared:
+        raise RuntimeError("No finite paired match points are available for plotting")
+
+    long_color = "#1f5f9e"
+    short_colors = [
+        "#c2571a",
+        "#178a63",
+        "#7b4ab8",
+        "#b33c60",
+        "#8a6f12",
+        "#156f7a",
+    ]
+    pane_count = len(prepared)
+    figure_width = max(10.0, 3.8 * pane_count)
+    figure, axes = plt.subplots(
+        1,
+        pane_count,
+        figsize=(figure_width, 4.2),
+        dpi=PLOT_DPI,
+        squeeze=False,
+    )
+
+    try:
+        if figure.canvas.manager is not None:
+            figure.canvas.manager.set_window_title("Pearson Paired Points")
+        figure.patch.set_facecolor("white")
+        figure.suptitle(
+            f"Pearson Paired Points | metric={metric} | sample={sample_method}",
+            fontsize=14,
+            y=0.98,
+        )
+
+        for index, (match, xs, short_ys, long_ys) in enumerate(prepared):
+            axis = axes[0][index]
+            short_axis = axis.twinx()
+            short_axis.patch.set_alpha(0.0)
+            color = short_colors[index % len(short_colors)]
+            marker = "." if len(xs) <= 700 else None
+            marker_size = 2.4 if marker else 0.0
+
+            long_line = axis.plot(
+                xs,
+                long_ys,
+                color=long_color,
+                linewidth=1.35,
+                marker=marker,
+                markersize=marker_size,
+                alpha=LONG_OVERLAY_ALPHA,
+                label="Wearable paired points",
+            )
+            short_line = short_axis.plot(
+                xs,
+                short_ys,
+                color=color,
+                linewidth=1.35,
+                marker=marker,
+                markersize=marker_size,
+                alpha=SHORT_OVERLAY_ALPHA,
+                label="Ultrasound paired points",
+            )
+
+            x_min, x_max = _expanded_bounds(xs)
+            long_y_min, long_y_max = _expanded_bounds(long_ys)
+            short_y_min, short_y_max = _expanded_bounds(short_ys)
+
+            axis.set_title(
+                f"phase {match.rank} | {match.start_time:.6g}-{match.end_time:.6g}",
+                fontsize=10,
+                pad=8,
+            )
+            axis.set_xlim(x_min, x_max)
+            axis.set_ylim(long_y_min, long_y_max)
+            short_axis.set_ylim(short_y_min, short_y_max)
+            axis.set_xlabel("Sample Time (s)", fontsize=9)
+            if index == 0:
+                axis.set_ylabel("Wearable paired value", color=long_color, fontsize=9)
+            else:
+                axis.tick_params(axis="y", labelleft=False)
+            if index == pane_count - 1:
+                short_axis.set_ylabel("Ultrasound paired value", fontsize=9)
+            else:
+                short_axis.tick_params(axis="y", labelright=False)
+
+            axis.xaxis.set_major_locator(MaxNLocator(nbins=5))
+            axis.yaxis.set_major_locator(MaxNLocator(nbins=5))
+            short_axis.yaxis.set_major_locator(MaxNLocator(nbins=5))
+            axis.grid(True, color="#dfe4ea", linewidth=0.8)
+
+            axis.spines["top"].set_visible(False)
+            axis.spines["right"].set_visible(False)
+            axis.spines["left"].set_color(long_color)
+            axis.spines["bottom"].set_color("#38404a")
+            short_axis.spines["top"].set_visible(False)
+            short_axis.spines["right"].set_color("#38404a")
+            axis.tick_params(axis="x", colors="#2e343c", labelsize=8)
+            axis.tick_params(axis="y", colors=long_color, labelsize=8)
+            short_axis.tick_params(axis="y", colors="#2e343c", labelsize=8)
+
+            if index == 0:
+                lines = [*long_line, *short_line]
+                labels = [line.get_label() for line in lines]
+                axis.legend(lines, labels, loc="best", frameon=False, fontsize=8)
+
+        figure.subplots_adjust(
+            left=0.07,
+            right=0.93,
+            top=0.84,
+            bottom=0.14,
+            wspace=0.32,
         )
         if plot_path is not None:
             plot_path.parent.mkdir(parents=True, exist_ok=True)

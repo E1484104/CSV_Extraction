@@ -207,12 +207,26 @@ diagnostics such as raw normalized MAE/RMSE and Bland-Altman width remain availa
 standalone metrics, but they are not part of the default fusion score.
 
 For multiple short CSVs known to be in sorted order, pass the folder. The tool then
-selects one ordered, non-overlapping interval for each short CSV:
+selects one ordered interval for each short CSV. Adjacent intervals can overlap by up
+to 5 seconds by default, which helps when extracted ultrasound windows include a small
+amount of shared context:
 
 ```powershell
 python csv_interval_matcher.py `
   --short-dir "../20260805/Test2/Norm_Data" `
   --long "../20260805/Test2/Wearable_2_bpi_processed.csv"
+```
+
+When ordered matching has exactly three short CSVs, the default also requires the
+second match to start at least 30 seconds after the first match ends. This handles
+three-phase runs where the middle ultrasound image should align to reperfusion onset,
+not the occlusion segment immediately after phase 1. Disable the constraint when
+needed:
+
+```powershell
+python csv_interval_matcher.py --root "../20260814/Test9" `
+  --three-short-skip-after-first-s 0 `
+  --ordered-overlap-s 0
 ```
 
 If `ROOT/BPI_Processed` contains more than one CSV, pass `--long` directly or narrow the
@@ -226,6 +240,13 @@ python csv_interval_matcher.py `
   --long "../20260805/Test2/Wearable_2_bpi_processed.csv" `
   --metric all --start-step-rows 10
 ```
+
+The match table reports Pearson, Spearman, and smoothed Pearson (`smooth_r`)
+correlation coefficients with p-values (`pearson_p`, `spearman_p`,
+`smooth_r_p`). These are computed with SciPy's `pearsonr` and `spearmanr` on the
+paired resampled points used for each phase. The p-values should be interpreted as
+within-segment association tests because neighboring time-series points are not fully
+independent.
 
 Useful options:
 
@@ -252,6 +273,33 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" `
   --top 1 `
   --plot-output "matched_overlay.png"
 ```
+
+Plot the smoothed values used by `smooth_r`/`smooth_pearson` instead of the raw
+resampled curves:
+
+```powershell
+python csv_interval_matcher.py --root "../20260814/Test9" `
+  --plot-output "matched_overlay_smooth_r.png" `
+  --plot-smooth-r
+```
+
+After the main matched overlay window is closed, the matcher opens a second
+`Pearson Paired Points` window. This second plot uses only the paired values used for
+the per-phase Pearson calculation: the resampled short points and the long points
+sampled at those exact matched times. When `--plot-output` is a file, the second plot
+is saved next to it with `_paired_points` added to the filename.
+
+The same paired points are also written to the experiment root directory, one CSV per
+selected phase:
+
+```text
+matched_paired_points_phase1_Test9-1_fusion.csv
+matched_paired_points_phase2_Test9-3_fusion.csv
+matched_paired_points_phase3_Test9-4_fusion.csv
+```
+
+Each file contains the matched time, short offset, resampled ultrasound value, and
+matched wearable value used for the Pearson calculation.
 
 The overlay uses the matched long time as the bottom x-axis and maps short time with
 `long_time = match_start + (short_time - short_start)`. The Matplotlib window shows a

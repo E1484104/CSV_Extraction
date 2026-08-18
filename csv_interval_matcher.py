@@ -4,10 +4,12 @@ import argparse
 import csv
 import math
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from scipy import stats
 
 from config import ROOT_PATH, bpi_processed_path, norm_data_path
 
@@ -72,7 +74,9 @@ class CsvSeries:
 @dataclass(frozen=True)
 class WindowDiagnostics:
     pearson: float
+    pearson_p: float
     spearman: float
+    spearman_p: float
     rmse_z: float
     mae_z: float
     rmse_abs: float
@@ -82,6 +86,7 @@ class WindowDiagnostics:
     bias_abs: float
     derivative: float
     smooth_pearson: float
+    smooth_pearson_p: float
     smooth_derivative: float
     sign_agreement: float
     feature_corr: float
@@ -275,12 +280,23 @@ def zscore(values: np.ndarray) -> np.ndarray | None:
     return (values - float(np.mean(values))) / std
 
 
+def finite_pairs(left: np.ndarray, right: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    mask = np.isfinite(left) & np.isfinite(right)
+    return left[mask].astype(float), right[mask].astype(float)
+
+
+def pearson_test(left: np.ndarray, right: np.ndarray) -> tuple[float, float]:
+    left_values, right_values = finite_pairs(left, right)
+    if len(left_values) < 2:
+        return math.nan, math.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=stats.ConstantInputWarning)
+        result = stats.pearsonr(left_values, right_values)
+    return float(result.statistic), float(result.pvalue)
+
+
 def correlation(left: np.ndarray, right: np.ndarray) -> float:
-    left_z = zscore(left)
-    right_z = zscore(right)
-    if left_z is None or right_z is None:
-        return math.nan
-    return float(np.mean(left_z * right_z))
+    return pearson_test(left, right)[0]
 
 
 def rankdata(values: np.ndarray) -> np.ndarray:
@@ -296,8 +312,18 @@ def rankdata(values: np.ndarray) -> np.ndarray:
     return ranks
 
 
+def spearman_test(left: np.ndarray, right: np.ndarray) -> tuple[float, float]:
+    left_values, right_values = finite_pairs(left, right)
+    if len(left_values) < 2:
+        return math.nan, math.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=stats.ConstantInputWarning)
+        result = stats.spearmanr(left_values, right_values)
+    return float(result.statistic), float(result.pvalue)
+
+
 def spearman_correlation(left: np.ndarray, right: np.ndarray) -> float:
-    return correlation(rankdata(left), rankdata(right))
+    return spearman_test(left, right)[0]
 
 
 def smooth(values: np.ndarray, window: int) -> np.ndarray:
@@ -436,10 +462,15 @@ def diagnostics_for_window(
     long_derivative = np.gradient(long_values, grid_offsets)
     short_smooth_derivative = np.gradient(short_smooth, grid_offsets)
     long_smooth_derivative = np.gradient(long_smooth, grid_offsets)
+    pearson_r, pearson_p = pearson_test(short_values, long_values)
+    spearman_r, spearman_p = spearman_test(short_values, long_values)
+    smooth_pearson_r, smooth_pearson_p = pearson_test(short_smooth, long_smooth)
 
     return WindowDiagnostics(
-        pearson=correlation(short_values, long_values),
-        spearman=spearman_correlation(short_values, long_values),
+        pearson=pearson_r,
+        pearson_p=pearson_p,
+        spearman=spearman_r,
+        spearman_p=spearman_p,
         rmse_z=z_rmse(short_values, long_values),
         mae_z=z_mae(short_values, long_values),
         rmse_abs=raw_rmse(short_values, long_values),
@@ -448,7 +479,8 @@ def diagnostics_for_window(
         bland_altman_abs=bland_altman_raw_width(short_values, long_values),
         bias_abs=absolute_bias(short_values, long_values),
         derivative=correlation(short_derivative, long_derivative),
-        smooth_pearson=correlation(short_smooth, long_smooth),
+        smooth_pearson=smooth_pearson_r,
+        smooth_pearson_p=smooth_pearson_p,
         smooth_derivative=correlation(short_smooth_derivative, long_smooth_derivative),
         sign_agreement=sign_agreement(short_smooth, long_smooth),
         feature_corr=correlation(morphology_features(short_smooth), morphology_features(long_smooth)),
@@ -545,7 +577,7 @@ def scored_series_for_short(
             sampled_values, gaps = nearest_sample(long.times, long.values, target_times)
 
         if args.max_nearest_gap_s is not None and np.any(gaps > args.max_nearest_gap_s):
-            diagnostics = WindowDiagnostics(*(math.nan for _ in range(14)))
+            diagnostics = WindowDiagnostics(*(math.nan for _ in range(17)))
         else:
             diagnostics = diagnostics_for_window(
                 short_values,
@@ -646,6 +678,8 @@ def select_ordered_non_overlapping(
     *,
     metric: str,
     gap_s: float,
+    overlap_s: float,
+    three_short_skip_after_first_s: float,
 ) -> list[MatchResult]:
     if len(scored_items) == 1:
         return select_top_results(
@@ -656,6 +690,10 @@ def select_ordered_non_overlapping(
         )
     if gap_s < 0:
         raise RuntimeError("--ordered-gap-s cannot be negative")
+    if overlap_s < 0:
+        raise RuntimeError("--ordered-overlap-s cannot be negative")
+    if three_short_skip_after_first_s < 0:
+        raise RuntimeError("--three-short-skip-after-first-s cannot be negative")
 
     previous = scored_items[0]
     previous_scores = previous.scores_by_metric[metric]
@@ -669,7 +707,11 @@ def select_ordered_non_overlapping(
         current_scores = np.full(len(current.starts), -math.inf, dtype=float)
         current_paths: list[list[int]] = [[] for _ in range(len(current.starts))]
         for index, start_time in enumerate(current.starts):
-            previous_limit = float(start_time) - previous_duration - gap_s
+            if len(scored_items) == 3 and item_index == 1:
+                transition_gap_s = max(gap_s, three_short_skip_after_first_s)
+                previous_limit = float(start_time) - previous_duration - transition_gap_s
+            else:
+                previous_limit = float(start_time) - previous_duration - gap_s + overlap_s
             previous_index = int(np.searchsorted(previous.starts, previous_limit, side="right") - 1)
             own_score = float(current.scores_by_metric[metric][index])
             if previous_index < 0 or not math.isfinite(own_score):
@@ -755,13 +797,16 @@ def format_results(results: list[MatchResult], *, compact: bool = False) -> str:
             "end_time",
             "score",
             "pearson",
+            "pearson_p",
             "spearman",
+            "spearman_p",
             "rmse_z",
             "mae_abs",
             "rmse_abs",
             "ba_width",
             "ba_abs",
             "smooth_r",
+            "smooth_r_p",
             "smooth_dr",
             "mean_gap",
             "max_gap",
@@ -775,13 +820,16 @@ def format_results(results: list[MatchResult], *, compact: bool = False) -> str:
                 f"{result.end_time:.10g}",
                 f"{result.score:.6f}",
                 f"{result.diagnostics.pearson:.6f}",
+                f"{result.diagnostics.pearson_p:.3g}",
                 f"{result.diagnostics.spearman:.6f}",
+                f"{result.diagnostics.spearman_p:.3g}",
                 f"{result.diagnostics.rmse_z:.6f}",
                 f"{result.diagnostics.mae_abs:.6f}",
                 f"{result.diagnostics.rmse_abs:.6f}",
                 f"{result.diagnostics.bland_altman:.6f}",
                 f"{result.diagnostics.bland_altman_abs:.6f}",
                 f"{result.diagnostics.smooth_pearson:.6f}",
+                f"{result.diagnostics.smooth_pearson_p:.3g}",
                 f"{result.diagnostics.smooth_derivative:.6f}",
                 f"{result.mean_time_error:.6g}",
                 f"{result.max_time_error:.6g}",
@@ -811,7 +859,9 @@ def write_results(path: Path, results: list[MatchResult]) -> None:
             "end_time",
             "score",
             "pearson",
+            "pearson_p",
             "spearman",
+            "spearman_p",
             "rmse_z",
             "mae_z",
             "rmse_abs",
@@ -821,6 +871,7 @@ def write_results(path: Path, results: list[MatchResult]) -> None:
             "bias_abs",
             "derivative",
             "smooth_pearson",
+            "smooth_pearson_p",
             "smooth_derivative",
             "sign_agreement",
             "feature_corr",
@@ -841,7 +892,9 @@ def write_results(path: Path, results: list[MatchResult]) -> None:
                     "end_time": f"{result.end_time:.10g}",
                     "score": f"{result.score:.10g}",
                     "pearson": f"{diagnostics.pearson:.10g}",
+                    "pearson_p": f"{diagnostics.pearson_p:.10g}",
                     "spearman": f"{diagnostics.spearman:.10g}",
+                    "spearman_p": f"{diagnostics.spearman_p:.10g}",
                     "rmse_z": f"{diagnostics.rmse_z:.10g}",
                     "mae_z": f"{diagnostics.mae_z:.10g}",
                     "rmse_abs": f"{diagnostics.rmse_abs:.10g}",
@@ -851,6 +904,7 @@ def write_results(path: Path, results: list[MatchResult]) -> None:
                     "bias_abs": f"{diagnostics.bias_abs:.10g}",
                     "derivative": f"{diagnostics.derivative:.10g}",
                     "smooth_pearson": f"{diagnostics.smooth_pearson:.10g}",
+                    "smooth_pearson_p": f"{diagnostics.smooth_pearson_p:.10g}",
                     "smooth_derivative": f"{diagnostics.smooth_derivative:.10g}",
                     "sign_agreement": f"{diagnostics.sign_agreement:.10g}",
                     "feature_corr": f"{diagnostics.feature_corr:.10g}",
@@ -861,6 +915,84 @@ def write_results(path: Path, results: list[MatchResult]) -> None:
             )
 
 
+def paired_values_for_match(
+    scored: ScoredSeries,
+    result: MatchResult,
+    long: CsvSeries,
+    args: argparse.Namespace,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    short_offsets = scored.short.times - scored.short.times[0]
+    aligned_times = result.start_time + scored.grid_offsets
+    short_values = np.interp(scored.grid_offsets, short_offsets, scored.short.values)
+    if args.sample_method == "linear":
+        long_values, _ = linear_sample(long.times, long.values, aligned_times)
+    else:
+        long_values, _ = nearest_sample(long.times, long.values, aligned_times)
+    return aligned_times, short_values, long_values
+
+
+def paired_points_csv_filename(result: MatchResult) -> str:
+    short_stem = safe_filename_component(Path(result.short_name).stem)
+    metric = safe_filename_component(result.metric)
+    return f"matched_paired_points_phase{result.rank}_{short_stem}_{metric}.csv"
+
+
+def write_paired_match_csvs(
+    plot_requests: list[tuple[ScoredSeries, MatchResult]],
+    long: CsvSeries,
+    args: argparse.Namespace,
+) -> list[Path]:
+    if not plot_requests:
+        return []
+
+    output_dir = args.root
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written_paths: list[Path] = []
+    fieldnames = [
+        "phase",
+        "short_csv",
+        "metric",
+        "match_start_time",
+        "match_end_time",
+        "point_index",
+        "matched_time_s",
+        "short_offset_s",
+        "short_value",
+        "long_value",
+    ]
+
+    for scored, result in plot_requests:
+        aligned_times, short_values, long_values = paired_values_for_match(
+            scored,
+            result,
+            long,
+            args,
+        )
+        path = output_dir / paired_points_csv_filename(result)
+        with path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+            for index, (time_s, short_value, long_value) in enumerate(
+                zip(aligned_times, short_values, long_values)
+            ):
+                writer.writerow(
+                    {
+                        "phase": result.rank,
+                        "short_csv": result.short_name,
+                        "metric": result.metric,
+                        "match_start_time": f"{result.start_time:.10g}",
+                        "match_end_time": f"{result.end_time:.10g}",
+                        "point_index": index,
+                        "matched_time_s": f"{float(time_s):.10g}",
+                        "short_offset_s": f"{float(time_s - result.start_time):.10g}",
+                        "short_value": f"{float(short_value):.10g}",
+                        "long_value": f"{float(long_value):.10g}",
+                    }
+                )
+        written_paths.append(path)
+    return written_paths
+
+
 def safe_filename_component(text: str) -> str:
     allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
     cleaned = "".join(character if character in allowed else "_" for character in text)
@@ -869,6 +1001,10 @@ def safe_filename_component(text: str) -> str:
 
 def overlay_plot_filename(metric: str) -> str:
     return f"matched_overlay_{safe_filename_component(metric)}.png"
+
+
+def paired_points_plot_filename(metric: str) -> str:
+    return f"matched_paired_points_{safe_filename_component(metric)}.png"
 
 
 def match_overlay_plot_path(
@@ -888,6 +1024,45 @@ def match_overlay_plot_path(
     return plot_output / overlay_plot_filename(metric)
 
 
+def paired_points_plot_path(
+    plot_output: Path | None,
+    *,
+    metric: str,
+    total_groups: int,
+) -> Path | None:
+    if plot_output is None:
+        return None
+    if plot_output.suffix:
+        if total_groups > 1:
+            raise RuntimeError(
+                "--plot-output must be a directory when plots are generated for multiple metrics"
+            )
+        return plot_output.with_name(
+            f"{plot_output.stem}_paired_points{plot_output.suffix}"
+        )
+    return plot_output / paired_points_plot_filename(metric)
+
+
+def equivalent_smooth_window_points(
+    series_times: np.ndarray,
+    grid_offsets: np.ndarray,
+    smooth_window_points: int,
+) -> int:
+    if smooth_window_points <= 1 or len(series_times) < 2 or len(grid_offsets) < 2:
+        return 1
+
+    grid_deltas = np.diff(grid_offsets)
+    grid_deltas = grid_deltas[grid_deltas > EPSILON]
+    series_deltas = np.diff(series_times)
+    series_deltas = series_deltas[series_deltas > EPSILON]
+    if len(grid_deltas) == 0 or len(series_deltas) == 0:
+        return 1
+
+    smooth_window_s = float(np.median(grid_deltas)) * smooth_window_points
+    series_step_s = float(np.median(series_deltas))
+    return max(1, int(round(smooth_window_s / series_step_s)))
+
+
 def write_match_plots(
     plot_requests: list[tuple[ScoredSeries, MatchResult]],
     long: CsvSeries,
@@ -898,7 +1073,11 @@ def write_match_plots(
     if args.plot_output is None and args.no_plot:
         return []
 
-    from plotting import MatchOverlaySeries, write_dual_axis_match_overlay_plot
+    from plotting import (
+        MatchOverlaySeries,
+        write_dual_axis_match_overlay_plot,
+        write_paired_match_points_plot,
+    )
 
     grouped_requests: dict[str, list[tuple[ScoredSeries, MatchResult]]] = {}
     for scored, result in plot_requests:
@@ -913,36 +1092,89 @@ def write_match_plots(
             metric=metric,
             total_groups=total_groups,
         )
+        paired_plot_path = paired_points_plot_path(
+            args.plot_output,
+            metric=metric,
+            total_groups=total_groups,
+        )
+        plot_mode = "smooth_r" if getattr(args, "plot_smooth_r", False) else "raw"
+        plot_long_values = long.values
+        if getattr(args, "plot_smooth_r", False):
+            long_smooth_window = equivalent_smooth_window_points(
+                long.times,
+                requests[0][0].grid_offsets,
+                args.smooth_window_points,
+            )
+            plot_long_values = smooth(long.values, long_smooth_window)
+
         short_matches: list[MatchOverlaySeries] = []
+        paired_matches: list[MatchOverlaySeries] = []
         for scored, result in requests:
-            short_offsets = scored.short.times - scored.short.times[0]
-            short_values = np.interp(scored.grid_offsets, short_offsets, scored.short.values)
+            aligned_times, raw_short_values, raw_matched_long_values = (
+                paired_values_for_match(scored, result, long, args)
+            )
+            short_values = raw_short_values
+            overlay_matched_long_times = None
+            overlay_matched_long_values = None
+            if getattr(args, "plot_smooth_r", False):
+                short_values = smooth(short_values, args.smooth_window_points)
+                overlay_matched_long_times = aligned_times
+                overlay_matched_long_values = smooth(
+                    raw_matched_long_values,
+                    args.smooth_window_points,
+                )
             short_matches.append(
                 MatchOverlaySeries(
                     name=scored.short.path.name,
-                    aligned_times=result.start_time + scored.grid_offsets,
+                    aligned_times=aligned_times,
                     values=short_values,
                     y_label=scored.short.y_column,
                     start_time=result.start_time,
                     end_time=result.end_time,
                     rank=result.rank,
                     score=result.score,
+                    matched_long_times=overlay_matched_long_times,
+                    matched_long_values=overlay_matched_long_values,
+                )
+            )
+            paired_matches.append(
+                MatchOverlaySeries(
+                    name=scored.short.path.name,
+                    aligned_times=aligned_times,
+                    values=raw_short_values,
+                    y_label=scored.short.y_column,
+                    start_time=result.start_time,
+                    end_time=result.end_time,
+                    rank=result.rank,
+                    score=result.score,
+                    matched_long_times=aligned_times,
+                    matched_long_values=raw_matched_long_values,
                 )
             )
 
         write_dual_axis_match_overlay_plot(
             plot_path,
             long_times=long.times,
-            long_values=long.values,
+            long_values=plot_long_values,
             short_matches=short_matches,
             long_name=long.path.name,
             long_x_label=long.x_column,
             long_y_label=long.y_column,
             metric=metric,
+            plot_mode=plot_mode,
             show=show_plot,
         )
         if plot_path is not None:
             written_paths.append(plot_path)
+        write_paired_match_points_plot(
+            paired_plot_path,
+            matches=paired_matches,
+            metric=metric,
+            sample_method=args.sample_method,
+            show=show_plot,
+        )
+        if paired_plot_path is not None:
+            written_paths.append(paired_plot_path)
     return written_paths
 
 
@@ -1025,13 +1257,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--independent",
         action="store_true",
-        help="For --short-dir, print independent top matches instead of one ordered non-overlapping assignment.",
+        help="For --short-dir, print independent top matches instead of one ordered assignment.",
     )
     parser.add_argument(
         "--ordered-gap-s",
         type=float,
         default=0.0,
-        help="Extra required gap between ordered non-overlapping windows. Default: 0.",
+        help="Extra required gap between adjacent ordered windows. Default: 0.",
+    )
+    parser.add_argument(
+        "--ordered-overlap-s",
+        type=float,
+        default=5.0,
+        help=(
+            "Allowed overlap between adjacent ordered windows, in seconds. "
+            "Default: 5."
+        ),
+    )
+    parser.add_argument(
+        "--three-short-skip-after-first-s",
+        type=float,
+        default=30.0,
+        help=(
+            "When ordered matching has exactly three short CSVs, require the second "
+            "match to start at least this many seconds after the first match ends. "
+            "Use 0 to disable. Default: 30."
+        ),
     )
     parser.add_argument("--max-nearest-gap-s", type=float, help="Reject windows with a larger nearest-time gap.")
     parser.add_argument("--output", type=Path, help="Optional CSV path for the match table.")
@@ -1041,6 +1292,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "PNG path for one matched dual-axis overlay, or directory when plotting multiple metrics. "
             "Uses the full long time axis and aligns every selected short curve onto it."
+        ),
+    )
+    parser.add_argument(
+        "--plot-smooth-r",
+        action="store_true",
+        help=(
+            "Plot the smoothed short and matched-long window values used by "
+            "smooth_r/smooth_pearson instead of raw resampled values."
         ),
     )
     parser.add_argument(
@@ -1100,16 +1359,31 @@ def main(argv: list[str] | None = None) -> int:
                 scored_items,
                 metric=metric,
                 gap_s=args.ordered_gap_s,
+                overlap_s=args.ordered_overlap_s,
+                three_short_skip_after_first_s=args.three_short_skip_after_first_s,
             )
             all_results.extend(results)
             plot_requests.extend(zip(scored_items, results))
             print()
-            print(f"ordered non-overlapping selection | metric={metric}")
+            constraint_text = (
+                f"ordered selection | metric={metric} | "
+                f"overlap_s={args.ordered_overlap_s:g}"
+            )
+            if len(scored_items) == 3 and args.three_short_skip_after_first_s > 0:
+                constraint_text += (
+                    " | "
+                    f"three_short_skip_after_first_s={args.three_short_skip_after_first_s:g}"
+                )
+            print(constraint_text)
             print(format_results(results, compact=args.metric == "all"))
 
     if args.output is not None:
         write_results(args.output, all_results)
         print(f"\nwrote {args.output}")
+
+    paired_csv_paths = write_paired_match_csvs(plot_requests, long, args)
+    if paired_csv_paths:
+        print(f"\nwrote {len(paired_csv_paths)} paired-point CSV files to {args.root}")
 
     plot_paths = write_match_plots(plot_requests, long, args)
     if plot_paths:
