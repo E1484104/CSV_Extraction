@@ -324,9 +324,8 @@ matched wearable value used for the Pearson calculation.
 written by `csv_interval_matcher.py`. It scans same-duration windows across all paired
 CSVs in a folder and ranks the common window sizes by the average best Pearson
 correlation. By default it expects 3000 valid paired rows per CSV, tests durations from
-5 seconds upward in 1-second steps, slides each tested window start in 1-second steps,
-and keeps the printed top windows distinct by allowing at most 20% overlap within the
-same CSV:
+5 seconds upward in 1-second steps, slides each tested window start in 0.1-second
+steps, and keeps the printed top 5 window durations different from each other:
 
 ```powershell
 python paired_window_search.py "../20260814/Test6"
@@ -335,12 +334,13 @@ python paired_window_search.py "../20260814/Test6"
 If your paired CSVs are in a dedicated folder:
 
 ```powershell
-python paired_window_search.py ".tmp/matcher_query_test6_pearson_3000"
+python paired_window_search.py "paired_csv_folder"
 ```
 
 The CLI prints the top 5 common window sizes. For each rank, every CSV uses the same
-window duration, and the table shows that CSV's best relative time segment, matched
-absolute time segment when `matched_time_s` is available, and Pearson value.
+window duration, each printed rank uses a different window duration, and each CSV row
+shows only the CSV name, Pearson value, Pearson p-value, `matched_start_s`, and
+`matched_end_s`.
 
 Useful options:
 
@@ -348,14 +348,13 @@ Useful options:
 python paired_window_search.py "paired_csv_folder" `
   --min-duration-s 5 `
   --duration-step-s 1 `
-  --start-step-s 1 `
-  --max-overlap-fraction 0.2 `
+  --start-step-s 0.1 `
+  --show-duration-sweep `
   --top 5
 ```
 
 Use `--expected-points 0` if you need to scan paired CSV files that were not generated
-with `--resample-points 3000`. Use `--max-overlap-fraction 0` when you need strictly
-non-overlapping output windows.
+with `--resample-points 3000`.
 
 The overlay uses the matched long time as the bottom x-axis and maps short time with
 `long_time = match_start + (short_time - short_start)`. The Matplotlib window shows a

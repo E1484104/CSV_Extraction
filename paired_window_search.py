@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from scipy import stats
 
 
 DEFAULT_PATTERN = "matched_paired_points*.csv"
@@ -49,6 +50,7 @@ class PairedSeries:
 class WindowResult:
     series: PairedSeries
     pearson: float
+    pearson_p: float
     start_s: float
     end_s: float
     absolute_start_s: float | None
@@ -345,6 +347,19 @@ def absolute_time_at(series: PairedSeries, time_s: float) -> float | None:
     return float(np.interp(time_s, series.times, series.absolute_times))
 
 
+def pearson_p_value(pearson: float, points: int) -> float:
+    if points < 2 or not math.isfinite(pearson):
+        return math.nan
+    if points == 2:
+        return 1.0
+    clipped = max(-1.0, min(1.0, pearson))
+    if abs(clipped) >= 1.0:
+        return 0.0
+    degrees_of_freedom = points - 2
+    statistic = abs(clipped) * math.sqrt(degrees_of_freedom / (1.0 - clipped * clipped))
+    return float(2.0 * stats.t.sf(statistic, degrees_of_freedom))
+
+
 def make_window_result(
     series: PairedSeries,
     *,
@@ -354,9 +369,11 @@ def make_window_result(
     start_index: int,
     end_index_exclusive: int,
 ) -> WindowResult:
+    points = end_index_exclusive - start_index
     return WindowResult(
         series=series,
         pearson=pearson,
+        pearson_p=pearson_p_value(pearson, points),
         start_s=start_s,
         end_s=end_s,
         absolute_start_s=absolute_time_at(series, start_s),
@@ -429,41 +446,14 @@ def score_key(result: CommonDurationResult) -> tuple[float, float, float, float]
     )
 
 
-def overlap_fraction(left: WindowResult, right: WindowResult) -> float:
-    if left.series.path != right.series.path:
-        return 0.0
-    overlap = max(0.0, min(left.end_s, right.end_s) - max(left.start_s, right.start_s))
-    shorter = min(left.end_s - left.start_s, right.end_s - right.start_s)
-    if shorter <= 0:
-        return 0.0
-    return overlap / shorter
-
-
-def first_independent_window(
-    candidates: list[WindowResult],
-    selected: list[WindowResult],
-    *,
-    max_overlap_fraction: float,
-) -> WindowResult | None:
-    for candidate in candidates:
-        if all(
-            overlap_fraction(candidate, existing) <= max_overlap_fraction + EPSILON
-            for existing in selected
-        ):
-            return candidate
-    return None
-
-
-def select_top_common_windows(
+def score_common_windows_by_duration(
     series_items: list[PairedSeries],
     *,
     durations: np.ndarray,
     start_step_s: float,
     min_points: int,
-    top: int,
-    max_overlap_fraction: float,
 ) -> list[CommonDurationResult]:
-    candidates_by_duration: list[tuple[float, list[list[WindowResult]]]] = []
+    results: list[CommonDurationResult] = []
     for duration_s in durations:
         candidate_lists = [
             windows_for_duration(
@@ -475,86 +465,86 @@ def select_top_common_windows(
             for series in series_items
         ]
         if all(candidate_lists):
-            candidates_by_duration.append((float(duration_s), candidate_lists))
-
-    if not candidates_by_duration:
-        raise RuntimeError("No valid windows were found")
-
-    selected_by_series: list[list[WindowResult]] = [[] for _ in series_items]
-    results: list[CommonDurationResult] = []
-    while len(results) < top:
-        best_result: CommonDurationResult | None = None
-        for duration_s, candidate_lists in candidates_by_duration:
-            windows: list[WindowResult] = []
-            for series_index, candidates in enumerate(candidate_lists):
-                window = first_independent_window(
-                    candidates,
-                    selected_by_series[series_index],
-                    max_overlap_fraction=max_overlap_fraction,
+            results.append(
+                common_duration_result(
+                    float(duration_s),
+                    [candidates[0] for candidates in candidate_lists],
                 )
-                if window is None:
-                    break
-                windows.append(window)
-            if len(windows) != len(series_items):
-                continue
-
-            result = common_duration_result(duration_s, windows)
-            if best_result is None or score_key(result) > score_key(best_result):
-                best_result = result
-
-        if best_result is None:
-            break
-        results.append(best_result)
-        for series_index, window in enumerate(best_result.windows):
-            selected_by_series[series_index].append(window)
+            )
 
     if not results:
-        raise RuntimeError("No independent window sets were found")
+        raise RuntimeError("No valid windows were found")
+    results.sort(key=score_key, reverse=True)
     return results
+
+
+def select_top_common_windows(
+    series_items: list[PairedSeries],
+    *,
+    durations: np.ndarray,
+    start_step_s: float,
+    min_points: int,
+    top: int,
+) -> list[CommonDurationResult]:
+    results = score_common_windows_by_duration(
+        series_items,
+        durations=durations,
+        start_step_s=start_step_s,
+        min_points=min_points,
+    )
+    return results[:top]
 
 
 def format_optional_time(value: float | None) -> str:
     if value is None:
-        return ""
+        return "NA"
     return f"{value:.6f}"
 
 
-def print_series_summary(series_items: list[PairedSeries]) -> None:
-    print("paired_csv_summary")
-    print(
-        "csv,points,duration_s,time_column,absolute_time_column,left_column,right_column,"
-        "duplicate_time_rows"
-    )
-    for series in series_items:
-        print(
-            f"{series.path.name},{len(series.times)},{series.duration_s:.6f},"
-            f"{series.time_column},{series.absolute_time_column or ''},"
-            f"{series.left_column},{series.right_column},{series.duplicate_time_rows}"
-        )
+def format_p_value(value: float) -> str:
+    if not math.isfinite(value):
+        return "NA"
+    return f"{value:.3e}"
 
 
 def print_results(results: list[CommonDurationResult]) -> None:
-    print()
-    print("top_independent_common_windows")
-    print("rank,duration_s,avg_pearson,min_pearson,max_pearson,csv_count")
+    csv_width = max(
+        len("csv"),
+        *(len(window.series.path.name) for result in results for window in result.windows),
+    )
+    header = (
+        f"{'rank':>4}  {'duration_s':>10}  {'avg_pearson':>12}  "
+        f"{'csv':<{csv_width}}  {'pearson':>10}  {'p_value':>12}  "
+        f"{'matched_start_s':>15}  {'matched_end_s':>13}"
+    )
+    print(header)
+    print("-" * len(header))
     for rank, result in enumerate(results, start=1):
-        print(
-            f"{rank},{result.duration_s:.6f},{result.average_pearson:.10f},"
-            f"{result.min_pearson:.10f},{result.max_pearson:.10f},{len(result.windows)}"
-        )
-        print(
-            "csv,pearson,relative_start_s,relative_end_s,matched_start_s,"
-            "matched_end_s,start_idx,end_idx_exclusive,points"
-        )
+        if rank > 1:
+            print("-" * len(header))
         for window in result.windows:
             print(
-                f"{window.series.path.name},{window.pearson:.10f},"
-                f"{window.start_s:.6f},{window.end_s:.6f},"
-                f"{format_optional_time(window.absolute_start_s)},"
-                f"{format_optional_time(window.absolute_end_s)},"
-                f"{window.start_index},{window.end_index_exclusive},{window.points}"
+                f"{rank:>4}  {result.duration_s:>10.6f}  "
+                f"{result.average_pearson:>12.10f}  "
+                f"{window.series.path.name:<{csv_width}}  "
+                f"{window.pearson:>10.10f}  "
+                f"{format_p_value(window.pearson_p):>12}  "
+                f"{format_optional_time(window.absolute_start_s):>15}  "
+                f"{format_optional_time(window.absolute_end_s):>13}"
             )
-        print()
+
+
+def print_duration_sweep(results: list[CommonDurationResult]) -> None:
+    print()
+    print("duration_sweep")
+    print("duration_s,rank_by_score,avg_pearson,min_pearson,max_pearson,csv_count")
+    ranks = {id(result): rank for rank, result in enumerate(results, start=1)}
+    for result in sorted(results, key=lambda item: item.duration_s):
+        print(
+            f"{result.duration_s:.6f},{ranks[id(result)]},"
+            f"{result.average_pearson:.10f},{result.min_pearson:.10f},"
+            f"{result.max_pearson:.10f},{len(result.windows)}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -618,8 +608,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--start-step-s",
         type=float,
-        default=1.0,
-        help="Step between tested window starts in seconds. Default: 1.",
+        default=0.1,
+        help="Step between tested window starts in seconds. Default: 0.1.",
     )
     parser.add_argument(
         "--min-points-per-window",
@@ -628,13 +618,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum valid paired points required inside a window. Default: 3.",
     )
     parser.add_argument(
-        "--max-overlap-fraction",
-        type=float,
-        default=0.2,
-        help=(
-            "Maximum allowed overlap with earlier printed windows in the same CSV. "
-            "Default: 0.2. Use 0 for strict non-overlap."
-        ),
+        "--show-duration-sweep",
+        action="store_true",
+        help="Print one summary row for every tested window duration.",
     )
     parser.add_argument("--top", type=int, default=5, help="Number of ranks to print. Default: 5.")
     return parser
@@ -671,31 +657,20 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("--top must be greater than 0")
         if args.min_points_per_window < 2:
             raise RuntimeError("--min-points-per-window must be at least 2")
-        if args.max_overlap_fraction < 0:
-            raise RuntimeError("--max-overlap-fraction must be at least 0")
-        results = select_top_common_windows(
+        scored_durations = score_common_windows_by_duration(
             series_items,
             durations=durations,
             start_step_s=args.start_step_s,
             min_points=args.min_points_per_window,
-            top=args.top,
-            max_overlap_fraction=args.max_overlap_fraction,
         )
+        results = scored_durations[:args.top]
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    print_series_summary(series_items)
-    print(
-        "\nscan_settings="
-        f"min_duration_s:{args.min_duration_s:g},"
-        f"max_duration_s:{float(durations[-1]):g},"
-        f"duration_step_s:{args.duration_step_s:g},"
-        f"start_step_s:{args.start_step_s:g},"
-        f"max_overlap_fraction:{args.max_overlap_fraction:g},"
-        f"durations_tested:{len(durations)}"
-    )
     print_results(results)
+    if args.show_duration_sweep:
+        print_duration_sweep(scored_durations)
     return 0
 
 

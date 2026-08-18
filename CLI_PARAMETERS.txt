@@ -244,13 +244,13 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" --long-x-co
 -----------------------------------------------------------
 用途：读取 csv_interval_matcher.py 每次运行后生成的 matched_paired_points*.csv，
 在所有 paired CSV 中使用相同窗口长度，寻找各 CSV 内 Pearson 最高的时间窗口，
-并按所有 CSV 的平均 Pearson 输出 top 5。
+并按所有 CSV 的平均 Pearson 输出 top 5，且 top 5 的窗口长度互不相同。
 
 常用命令：
 python paired_window_search.py "../20260814/Test6"
 
 如果 paired CSV 集中在单独文件夹：
-python paired_window_search.py ".tmp\matcher_query_test6_pearson_3000"
+python paired_window_search.py "paired_csv_folder"
 
 默认设置：
 - --pattern：匹配 matched_paired_points*.csv。
@@ -260,14 +260,15 @@ python paired_window_search.py ".tmp\matcher_query_test6_pearson_3000"
 - --left-column / --right-column：默认 short_value 与 long_value，用于计算 Pearson。
 - --min-duration-s：最短窗口 5 秒。
 - --duration-step-s：测试窗口长度步长 1 秒。
-- --start-step-s：窗口起点滑动步长 1 秒。
-- --max-overlap-fraction：同一个 CSV 中，后续输出窗口允许和已输出窗口重叠的最大比例，默认 0.2；如果要严格不重叠，设为 0。
-- --top：输出前 5 个统一窗口长度。
+- --start-step-s：窗口起点滑动步长 0.1 秒。
+- --show-duration-sweep：额外打印每个被测试窗口长度的 avg/min/max Pearson，用于确认 5..29 秒都已参与排序。
+- --top：输出前 5 个统一窗口长度；每个 rank 的 duration_s 不同。
 
 输出说明：
-- top_independent_common_windows 中每个 rank 是一组相对独立的窗口。
-- 同一个 rank 下，所有 CSV 都使用相同 duration_s。
-- 每个 CSV 行显示 pearson、relative_start_s/relative_end_s，以及存在 matched_time_s 时的 matched_start_s/matched_end_s。
+- 默认输出为对齐表格，每个 CSV 占一行。
+- 每行只显示 rank、duration_s、avg_pearson、csv、pearson、p_value、matched_start_s、matched_end_s。
+- 同一个 rank 下，所有 CSV 都使用相同 duration_s；不同 rank 的 duration_s 互不相同。
+- 不限制不同 rank 的时间选段是否重叠；区域重叠也会参与排序。
 
 
 推荐调参顺序
