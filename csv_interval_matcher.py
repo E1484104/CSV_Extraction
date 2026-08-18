@@ -26,6 +26,7 @@ DEFAULT_X_CANDIDATES = [
 ]
 DEFAULT_Y_CANDIDATES = [
     "bpi_normalized",
+    "bpi_smoothed",
     "y_norm",
     "y_value",
     "y_px",

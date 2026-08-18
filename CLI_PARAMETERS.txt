@@ -3,7 +3,7 @@
 
 通用说明
 --------
-- 五个入口：main.py、vevo_stitcher.py、ultrasound_normalizer.py、wearable_normalizer.py、csv_interval_matcher.py。
+- 六个入口：main.py、vevo_stitcher.py、ultrasound_normalizer.py、wearable_normalizer.py、csv_interval_matcher.py、paired_window_search.py。
 - --root 用于指定一次实验的根目录；只有没有手动输入 --input 或 --output 时才会生效。
 - 如果同时输入 --root 和 --input/--output，显式输入的 --input/--output 优先。
 
@@ -109,10 +109,10 @@ python main.py --root "../Tester1" --no-plot
 - --y-min：真实 y 轴最小值。
 - --y-max：真实 y 轴最大值。
 
-3. wearable_normalizer.py：Wearable BPI CSV 归一化绘图
------------------------------------------------------
-用途：读取 Wearable CSV，生成新增 time_s 与 bpi_normalized 的处理后 CSV，
-并用 Matplotlib 打开窗口查看 BPI 归一化曲线。
+3. wearable_normalizer.py：Wearable BPI CSV 时间轴处理与绘图
+----------------------------------------------------------
+用途：读取 Wearable CSV，默认只生成新增 time_s 的处理后 CSV，
+并用 Matplotlib 打开窗口查看 BPI 曲线。BPI 归一化需要显式开启。
 
 常用命令：
 python wearable_normalizer.py --input "../20260805/Test2/Wearable_2.csv"
@@ -130,16 +130,20 @@ python wearable_normalizer.py --input "../20260805/Test2/Wearable_2.csv"
 - --no-plot：不显示也不保存图，只生成处理后 CSV。
 - --timestamp-column：指定 timestamp 列名；默认自动识别 Timestamp。
 - --bpi-column：指定 BPI 原始数据列名；默认自动识别 BPI。
-- --denoise：开启旧的底噪抽样、删点和除底噪步骤；默认关闭。
-- --noise-sample-count：只在 --denoise 时使用；在 min-max 归一化后随机抽取多少个有效点估计底噪，默认 2000。
+- --normalize-bpi：额外生成 bpi_normalized，使用 BPI 的 min-max 归一化；默认关闭。
+- --no-normalize-bpi：只新增 time_s，保留原始 BPI；这是默认行为。
+- --denoise：开启旧的底噪抽样、删点和除底噪步骤；需要 --normalize-bpi；默认关闭。
+- --noise-sample-count：只在 --normalize-bpi --denoise 时使用；在 min-max 归一化后随机抽取多少个有效点估计底噪，默认 2000。
 - --noise-seed：底噪随机抽样种子，默认 0；固定 seed 可保证重复运行结果一致。
 - --no-denoise：关闭归一化后的底噪抽样、删点和除底噪步骤；这是默认行为。
-- --bpi-smooth-window-points：对 bpi_normalized 做居中移动平均的窗口点数，默认 15；设为 1 可关闭，必须为奇数。
-- --bottom-envelop：可选；在 Wearable 归一化和平滑之后估计下包络线，并让每个 bpi_normalized 点减去对应下包络线值，实现底部归零。
+- --bpi-smooth-window-points：居中移动平均窗口点数；默认 1，即关闭 smoothing；必须为奇数。不使用 --normalize-bpi 时会对原始 BPI 平滑并新增 bpi_smoothed；使用 --normalize-bpi 时会对 bpi_normalized 平滑。
+- --bottom-envelop：可选；需要 --normalize-bpi；在 Wearable 归一化和平滑之后估计下包络线，并让每个 bpi_normalized 点减去对应下包络线值，实现底部归零。
 
 处理后的 CSV 会保留原列，并新增：
 - time_s：每个 Timestamp 减去第一个 Timestamp。
-- bpi_normalized：BPI 原始数据按 min-max 归一化，默认再做 15 点居中移动平均；默认不再做随机底噪抽样、删点和除底噪。如果使用 --denoise，会按旧流程随机抽取 2000 个归一化点取平均作为底噪，删除这些抽样点，剩余点除以底噪值，因此结果可能大于 1。如果使用 --bottom-envelop，会在上述处理之后减去下包络线，让曲线底部归零。
+- 默认不新增 bpi_normalized，也不改变 BPI 数值。
+- 使用 --bpi-smooth-window-points N 且不使用 --normalize-bpi 时，会新增 bpi_smoothed：对原始 BPI 做 N 点居中移动平均，原始 BPI 列仍保留。
+- 使用 --normalize-bpi 时，才新增 bpi_normalized：BPI 原始数据按 min-max 归一化；默认不做 smoothing，也不做随机底噪抽样、删点和除底噪。如果同时使用 --bpi-smooth-window-points N，会对归一化后的 bpi_normalized 做 N 点居中移动平均。如果使用 --denoise，会按旧流程随机抽取 2000 个归一化点取平均作为底噪，删除这些抽样点，剩余点除以底噪值，因此结果可能大于 1。如果使用 --bottom-envelop，会在上述处理之后减去下包络线，让曲线底部归零。
 
 默认只打开 Matplotlib 窗口，不会在命令行询问是否保存图片。设置
 --plot-output 或 --save-plot 时才会自动保存图片。
@@ -195,7 +199,7 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" --top 1 --p
 默认自动识别：
 - 输入路径：未传 --short/--short-dir 时使用 ROOT_PATH/Norm_Data；未传 --long/--long-dir 时使用 ROOT_PATH/BPI_Processed 中唯一的 CSV。
 - 时间列：time_s、x_norm、x_value、x_px、Timestamp。
-- 数值列：bpi_normalized、y_norm、y_value、y_px、BPI。
+- 数值列：bpi_normalized、bpi_smoothed、y_norm、y_value、y_px、BPI。
 
 匹配与评分：
 - 单个 --short 输入时，默认按长 CSV 的每一个时间点作为候选起点逐点滑动。
@@ -234,6 +238,36 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" --top 1 --p
 
 如果长 CSV 的 timestamp 丢失小数精度，可以用行号和采样率重建时间轴：
 python csv_interval_matcher.py --short "short.csv" --long "long.csv" --long-x-column row_index --long-sample-rate 250
+
+
+6. paired_window_search.py：paired CSV 统一窗口 Pearson 搜索
+-----------------------------------------------------------
+用途：读取 csv_interval_matcher.py 每次运行后生成的 matched_paired_points*.csv，
+在所有 paired CSV 中使用相同窗口长度，寻找各 CSV 内 Pearson 最高的时间窗口，
+并按所有 CSV 的平均 Pearson 输出 top 5。
+
+常用命令：
+python paired_window_search.py "../20260814/Test6"
+
+如果 paired CSV 集中在单独文件夹：
+python paired_window_search.py ".tmp\matcher_query_test6_pearson_3000"
+
+默认设置：
+- --pattern：匹配 matched_paired_points*.csv。
+- --expected-points：每个 CSV 必须有 3000 个有效 paired 点；如果不是 3000 点，用 --expected-points 0 关闭检查。
+- --time-column：默认优先 short_offset_s，用于相对窗口搜索。
+- --absolute-time-column：默认使用 matched_time_s，用于输出绝对时间选段。
+- --left-column / --right-column：默认 short_value 与 long_value，用于计算 Pearson。
+- --min-duration-s：最短窗口 5 秒。
+- --duration-step-s：测试窗口长度步长 1 秒。
+- --start-step-s：窗口起点滑动步长 1 秒。
+- --max-overlap-fraction：同一个 CSV 中，后续输出窗口允许和已输出窗口重叠的最大比例，默认 0.2；如果要严格不重叠，设为 0。
+- --top：输出前 5 个统一窗口长度。
+
+输出说明：
+- top_independent_common_windows 中每个 rank 是一组相对独立的窗口。
+- 同一个 rank 下，所有 CSV 都使用相同 duration_s。
+- 每个 CSV 行显示 pearson、relative_start_s/relative_end_s，以及存在 matched_time_s 时的 matched_start_s/matched_end_s。
 
 
 推荐调参顺序

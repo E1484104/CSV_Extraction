@@ -17,12 +17,15 @@ from plotting import PLOT_DPI, PLOT_FIGSIZE
 
 TIME_COLUMN = "time_s"
 BPI_NORMALIZED_COLUMN = "bpi_normalized"
+BPI_SMOOTHED_COLUMN = "bpi_smoothed"
 DEFAULT_OUTPUT_DIRNAME = "BPI_Processed"
 DEFAULT_OUTPUT_SUFFIX = "_bpi_processed"
-DEFAULT_PLOT_SUFFIX = "_bpi_normalized"
+DEFAULT_RAW_PLOT_SUFFIX = "_bpi"
+DEFAULT_SMOOTHED_PLOT_SUFFIX = "_bpi_smoothed"
+DEFAULT_NORMALIZED_PLOT_SUFFIX = "_bpi_normalized"
 DEFAULT_NOISE_SAMPLE_COUNT = 2000
 DEFAULT_NOISE_SEED = 0
-DEFAULT_BPI_SMOOTH_WINDOW_POINTS = 15
+DEFAULT_BPI_SMOOTH_WINDOW_POINTS = 1
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,7 @@ class WearableBpiStats:
     last_timestamp: float
     bpi_min: float
     bpi_max: float
+    normalize_bpi: bool
     noise_floor: float | None
     removed_noise_points: int
     smooth_window_points: int
@@ -122,9 +126,19 @@ def normalize_value(value: float, lower: float, upper: float) -> float:
     return (value - lower) / (upper - lower)
 
 
-def processed_fieldnames(fieldnames: list[str]) -> list[str]:
+def processed_fieldnames(
+    fieldnames: list[str],
+    *,
+    include_normalized_bpi: bool,
+    include_smoothed_bpi: bool,
+) -> list[str]:
     result = list(fieldnames)
-    for fieldname in (TIME_COLUMN, BPI_NORMALIZED_COLUMN):
+    extra_fieldnames = [TIME_COLUMN]
+    if include_normalized_bpi:
+        extra_fieldnames.append(BPI_NORMALIZED_COLUMN)
+    if include_smoothed_bpi:
+        extra_fieldnames.append(BPI_SMOOTHED_COLUMN)
+    for fieldname in extra_fieldnames:
         if fieldname not in result:
             result.append(fieldname)
     return result
@@ -240,6 +254,7 @@ def processed_rows(
     data: WearableCsvData,
     timestamp_column: str,
     bpi_column: str,
+    normalize_bpi: bool,
     noise_sample_count: int,
     noise_seed: int,
     bpi_smooth_window_points: int,
@@ -258,6 +273,69 @@ def processed_rows(
     raw_bpi_values = [bpi for _, _, bpi in valid_points]
     bpi_min = min(raw_bpi_values)
     bpi_max = max(raw_bpi_values)
+    if bpi_smooth_window_points < 1:
+        raise RuntimeError("--bpi-smooth-window-points must be greater than 0")
+    if bpi_smooth_window_points % 2 == 0:
+        raise RuntimeError("--bpi-smooth-window-points must be an odd number")
+
+    if not normalize_bpi:
+        if noise_sample_count:
+            raise RuntimeError("--denoise requires --normalize-bpi")
+        if bottom_envelop:
+            raise RuntimeError("--bottom-envelop requires --normalize-bpi")
+
+        first_timestamp = valid_points[0][1]
+        last_timestamp = valid_points[-1][1]
+        smoothed_by_index: dict[int, float] = {}
+        if bpi_smooth_window_points > 1:
+            smoothed_values = smooth_values(raw_bpi_values, bpi_smooth_window_points)
+            smoothed_by_index = {
+                index: smoothed
+                for (index, _, _), smoothed in zip(valid_points, smoothed_values)
+            }
+
+        output: list[dict[str, str]] = []
+        point_count = 0
+
+        for index, row in enumerate(data.rows):
+            output_row = dict(row)
+            timestamp = parse_float(row.get(timestamp_column))
+            bpi = parse_float(row.get(bpi_column))
+
+            if timestamp is None:
+                output_row[TIME_COLUMN] = ""
+            else:
+                output_row[TIME_COLUMN] = f"{timestamp - first_timestamp:.8g}"
+
+            if bpi_smooth_window_points > 1:
+                smoothed = smoothed_by_index.get(index)
+                if smoothed is None:
+                    output_row[BPI_SMOOTHED_COLUMN] = ""
+                else:
+                    output_row[BPI_SMOOTHED_COLUMN] = f"{smoothed:.8g}"
+
+            if timestamp is not None and bpi is not None:
+                point_count += 1
+            output.append(output_row)
+
+        return output, WearableBpiStats(
+            timestamp_column=timestamp_column,
+            bpi_column=bpi_column,
+            first_timestamp=first_timestamp,
+            last_timestamp=last_timestamp,
+            bpi_min=bpi_min,
+            bpi_max=bpi_max,
+            normalize_bpi=False,
+            noise_floor=None,
+            removed_noise_points=0,
+            smooth_window_points=bpi_smooth_window_points,
+            bottom_envelop=False,
+            bottom_envelope_min=None,
+            bottom_envelope_max=None,
+            row_count=len(data.rows),
+            point_count=point_count,
+        )
+
     normalized_points = [
         (index, timestamp, normalize_value(bpi, bpi_min, bpi_max))
         for index, timestamp, bpi in valid_points
@@ -327,6 +405,7 @@ def processed_rows(
         last_timestamp=last_timestamp,
         bpi_min=bpi_min,
         bpi_max=bpi_max,
+        normalize_bpi=True,
         noise_floor=noise_floor,
         removed_noise_points=len(noise_indices),
         smooth_window_points=bpi_smooth_window_points,
@@ -361,12 +440,20 @@ def plot_output_path_for(
     input_root: Path,
     processed_csv_path: Path,
     plot_output: Path | None,
+    *,
+    y_column: str,
 ) -> Path:
     if plot_output is None:
         return processed_csv_path.with_suffix(".png")
     if input_root.is_file() and plot_output.suffix:
         return plot_output
-    return plot_output / f"{input_csv.stem}{DEFAULT_PLOT_SUFFIX}.png"
+    if y_column == BPI_NORMALIZED_COLUMN:
+        suffix = DEFAULT_NORMALIZED_PLOT_SUFFIX
+    elif y_column == BPI_SMOOTHED_COLUMN:
+        suffix = DEFAULT_SMOOTHED_PLOT_SUFFIX
+    else:
+        suffix = DEFAULT_RAW_PLOT_SUFFIX
+    return plot_output / f"{input_csv.stem}{suffix}.png"
 
 
 def write_processed_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
@@ -388,11 +475,11 @@ def _expanded_bounds(values: list[float]) -> tuple[float, float]:
     return lower - padding, upper + padding
 
 
-def _plot_points(rows: list[dict[str, str]]) -> list[tuple[float, float]]:
+def _plot_points(rows: list[dict[str, str]], y_column: str) -> list[tuple[float, float]]:
     points: list[tuple[float, float]] = []
     for row in rows:
         x = parse_float(row.get(TIME_COLUMN))
-        y = parse_float(row.get(BPI_NORMALIZED_COLUMN))
+        y = parse_float(row.get(y_column))
         if x is not None and y is not None:
             points.append((x, y))
     return points
@@ -402,9 +489,10 @@ def show_wearable_bpi_plot(
     plot_path: Path | None,
     rows: list[dict[str, str]],
     *,
+    y_column: str,
     save_plot: bool,
 ) -> Path | None:
-    points = _plot_points(rows)
+    points = _plot_points(rows, y_column)
     if not points:
         raise RuntimeError("No finite wearable BPI points are available for plotting")
 
@@ -415,8 +503,14 @@ def show_wearable_bpi_plot(
 
     figure, axis = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
     try:
+        if y_column == BPI_NORMALIZED_COLUMN:
+            title = "Wearable BPI Normalized"
+        elif y_column == BPI_SMOOTHED_COLUMN:
+            title = "Wearable BPI Smoothed"
+        else:
+            title = "Wearable BPI"
         if figure.canvas.manager is not None:
-            figure.canvas.manager.set_window_title("Wearable BPI Normalized")
+            figure.canvas.manager.set_window_title(title)
         figure.patch.set_facecolor("white")
         axis.set_facecolor("#fbfcfe")
 
@@ -425,9 +519,9 @@ def show_wearable_bpi_plot(
         else:
             axis.plot(xs, ys, color="#1667be", linewidth=1.4)
 
-        axis.set_title("Wearable BPI Normalized", fontsize=14, pad=14)
+        axis.set_title(title, fontsize=14, pad=14)
         axis.set_xlabel(TIME_COLUMN)
-        axis.set_ylabel(BPI_NORMALIZED_COLUMN)
+        axis.set_ylabel(y_column)
         axis.set_xlim(x_min, x_max)
         axis.set_ylim(min(0.0, y_min), y_max)
         axis.xaxis.set_major_locator(MaxNLocator(nbins=8))
@@ -450,6 +544,14 @@ def show_wearable_bpi_plot(
         return saved_plot_path
     finally:
         plt.close(figure)
+
+
+def output_signal_column(stats: WearableBpiStats) -> str:
+    if stats.normalize_bpi:
+        return BPI_NORMALIZED_COLUMN
+    if stats.smooth_window_points > 1:
+        return BPI_SMOOTHED_COLUMN
+    return stats.bpi_column
 
 
 def process_wearable_bpi_csv(
@@ -477,6 +579,7 @@ def process_wearable_bpi_csv(
         data,
         timestamp_column=timestamp_column,
         bpi_column=bpi_column,
+        normalize_bpi=getattr(args, "normalize_bpi", False),
         noise_sample_count=(
             args.noise_sample_count
             if getattr(args, "denoise", False) and not getattr(args, "no_denoise", False)
@@ -486,15 +589,28 @@ def process_wearable_bpi_csv(
         bpi_smooth_window_points=args.bpi_smooth_window_points,
         bottom_envelop=getattr(args, "bottom_envelop", False),
     )
-    write_processed_csv(output_csv_path, processed_fieldnames(data.fieldnames), rows)
+    write_processed_csv(
+        output_csv_path,
+        processed_fieldnames(
+            data.fieldnames,
+            include_normalized_bpi=getattr(args, "normalize_bpi", False),
+            include_smoothed_bpi=(
+                not getattr(args, "normalize_bpi", False)
+                and args.bpi_smooth_window_points > 1
+            ),
+        ),
+        rows,
+    )
 
     saved_plot_path = None
     if not getattr(args, "no_plot", False):
+        plot_y_column = output_signal_column(stats)
         candidate_plot_path = plot_output_path_for(
             input_csv=csv_path,
             input_root=input_root,
             processed_csv_path=output_csv_path,
             plot_output=getattr(args, "plot_output", None),
+            y_column=plot_y_column,
         )
         auto_save = bool(
             getattr(args, "save_plot", False) or getattr(args, "plot_output", None) is not None
@@ -502,6 +618,7 @@ def process_wearable_bpi_csv(
         saved_plot_path = show_wearable_bpi_plot(
             candidate_plot_path,
             rows,
+            y_column=plot_y_column,
             save_plot=auto_save,
         )
 
@@ -543,29 +660,45 @@ def format_wearable_bpi_result(processed: ProcessedWearableBpi) -> str:
     stats = processed.stats
     duration = stats.last_timestamp - stats.first_timestamp
     plot_info = f" | plot {processed.plot_path}" if processed.plot_path else ""
-    if stats.noise_floor is None:
-        noise_info = " | denoise off"
-    else:
-        noise_info = (
-            f" | noise_floor={stats.noise_floor:.8g} "
-            f"removed={stats.removed_noise_points}"
+    if stats.normalize_bpi:
+        if stats.noise_floor is None:
+            noise_info = " | denoise off"
+        else:
+            noise_info = (
+                f" | noise_floor={stats.noise_floor:.8g} "
+                f"removed={stats.removed_noise_points}"
+            )
+        smooth_info = f" | smooth_window={stats.smooth_window_points}"
+        if stats.bottom_envelop and stats.bottom_envelope_min is not None:
+            bottom_info = (
+                f" | bottom_envelop=[{stats.bottom_envelope_min:.8g}, "
+                f"{stats.bottom_envelope_max:.8g}]"
+            )
+        else:
+            bottom_info = ""
+        signal_info = (
+            f"BPI {stats.bpi_column} [{stats.bpi_min:.8g}, {stats.bpi_max:.8g}] "
+            f"-> {BPI_NORMALIZED_COLUMN}{noise_info}"
+            f"{smooth_info}"
+            f"{bottom_info}"
         )
-    smooth_info = f" | smooth_window={stats.smooth_window_points}"
-    if stats.bottom_envelop and stats.bottom_envelope_min is not None:
-        bottom_info = (
-            f" | bottom_envelop=[{stats.bottom_envelope_min:.8g}, "
-            f"{stats.bottom_envelope_max:.8g}]"
-        )
     else:
-        bottom_info = ""
+        if stats.smooth_window_points > 1:
+            signal_info = (
+                f"BPI {stats.bpi_column} [{stats.bpi_min:.8g}, {stats.bpi_max:.8g}] "
+                f"-> {BPI_SMOOTHED_COLUMN} | normalization off | "
+                f"smooth_window={stats.smooth_window_points}"
+            )
+        else:
+            signal_info = (
+                f"BPI {stats.bpi_column} [{stats.bpi_min:.8g}, {stats.bpi_max:.8g}] "
+                "preserved | normalization off | smoothing off"
+            )
     return (
         f"{processed.input_path} -> {processed.csv_path} | "
         f"{stats.point_count}/{stats.row_count} points | "
         f"time {stats.timestamp_column} -> [0, {duration:.8g}] | "
-        f"BPI {stats.bpi_column} [{stats.bpi_min:.8g}, {stats.bpi_max:.8g}] "
-        f"-> {BPI_NORMALIZED_COLUMN}{noise_info}"
-        f"{smooth_info}"
-        f"{bottom_info}"
+        f"{signal_info}"
         f"{plot_info}"
     )
 
@@ -573,8 +706,8 @@ def format_wearable_bpi_result(processed: ProcessedWearableBpi) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Normalize wearable BPI CSV data and plot BPI against a zero-based "
-            "timestamp axis."
+            "Add a zero-based time_s axis to wearable BPI CSV data. BPI "
+            "normalization is optional."
         ),
     )
     parser.add_argument(
@@ -625,6 +758,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--bpi-column",
         help="Raw BPI column. Default: auto-detect BPI.",
     )
+    normalize_group = parser.add_mutually_exclusive_group()
+    normalize_group.add_argument(
+        "--normalize-bpi",
+        action="store_true",
+        dest="normalize_bpi",
+        help=(
+            "Also write bpi_normalized using min-max BPI normalization. "
+            "Default: off."
+        ),
+    )
+    normalize_group.add_argument(
+        "--no-normalize-bpi",
+        action="store_false",
+        dest="normalize_bpi",
+        help="Only write time_s and preserve raw BPI. This is the default.",
+    )
+    parser.set_defaults(normalize_bpi=False)
     parser.add_argument(
         "--noise-sample-count",
         type=int,
@@ -633,6 +783,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Used only with --denoise. After min-max normalization, randomly sample "
             "this many valid points, average them as the noise floor, remove those "
             "rows, and divide the remaining normalized BPI values by that floor. "
+            "Requires --normalize-bpi. "
             f"Default: {DEFAULT_NOISE_SAMPLE_COUNT}."
         ),
     )
@@ -646,7 +797,7 @@ def build_parser() -> argparse.ArgumentParser:
     denoise_group.add_argument(
         "--denoise",
         action="store_true",
-        help="Enable post-normalization noise-floor removal and division. Default: off.",
+        help="Enable post-normalization noise-floor removal and division. Requires --normalize-bpi. Default: off.",
     )
     denoise_group.add_argument(
         "--no-denoise",
@@ -660,8 +811,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_BPI_SMOOTH_WINDOW_POINTS,
         help=(
-            "Centered moving-average window applied to bpi_normalized after "
-            "normalization. Use 1 to disable. Must be odd. "
+            "Centered moving-average window. With --normalize-bpi it is applied to "
+            "bpi_normalized; otherwise it writes bpi_smoothed from raw BPI. "
+            "Use 1 to disable. Must be odd. "
             f"Default: {DEFAULT_BPI_SMOOTH_WINDOW_POINTS}."
         ),
     )
@@ -673,7 +825,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "After wearable BPI normalization and smoothing, estimate the lower "
             "envelope from local minima and subtract it from each bpi_normalized "
-            "point. Default: off."
+            "point. Requires --normalize-bpi. Default: off."
         ),
     )
     return parser

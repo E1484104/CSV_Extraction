@@ -120,15 +120,12 @@ Timestamp,BPI,PPG
 It writes a new processed CSV preserving the original columns and adding:
 
 ```csv
-time_s,bpi_normalized
+time_s
 ```
 
-`time_s` is each timestamp minus the first timestamp in the file. `bpi_normalized`
-is min-max normalized from the raw BPI column and then smoothed with a 15-point
-centered moving average by default. The old post-normalization noise-floor step is
-disabled by default because it mostly rescales the signal and randomly removes rows.
-Pass `--bottom-envelop` to estimate the lower envelope of the normalized wearable
-curve and subtract it from every point so the curve bottom is shifted to zero.
+`time_s` is each timestamp minus the first timestamp in the file. By default, the
+raw BPI column is preserved unchanged; no min-max normalization, smoothing,
+noise-floor removal, or bottom-envelope correction is applied.
 
 ```powershell
 python wearable_normalizer.py --input "../20260805/Test2/Wearable_2.csv"
@@ -142,7 +139,7 @@ location and save the figure automatically:
 ```powershell
 python wearable_normalizer.py --input "../20260805/Test2/Wearable_2.csv" `
   --output "Wearable_2_bpi_processed.csv" `
-  --plot-output "Wearable_2_bpi_normalized.png"
+  --plot-output "Wearable_2_bpi.png"
 ```
 
 If the wearable CSV uses different headers, specify them:
@@ -151,30 +148,49 @@ If the wearable CSV uses different headers, specify them:
 python wearable_normalizer.py --input "wearable.csv" --timestamp-column Timestamp --bpi-column BPI
 ```
 
-For the old noise-floor workflow, pass `--denoise`. It randomly samples normalized
-points, averages them as the noise floor, removes those sampled rows, and divides the
-remaining normalized values by that floor; because of that division,
-`bpi_normalized` can become greater than `1`. Noise-floor sampling is deterministic
-by default (`--noise-seed 0`) so repeated runs are comparable.
+To smooth raw BPI without min-max normalization, pass an odd moving-average window.
+This preserves the original BPI column and writes a separate `bpi_smoothed` column:
 
 ```powershell
 python wearable_normalizer.py --input "wearable.csv" `
+  --bpi-smooth-window-points 15
+```
+
+To also write `bpi_normalized`, explicitly enable min-max normalization:
+
+```powershell
+python wearable_normalizer.py --input "wearable.csv" `
+  --normalize-bpi
+```
+
+With normalization enabled, the same smoothing option is applied to the normalized
+BPI curve:
+
+```powershell
+python wearable_normalizer.py --input "wearable.csv" `
+  --normalize-bpi `
+  --bpi-smooth-window-points 15
+```
+
+For the old noise-floor workflow, pass `--normalize-bpi --denoise`. It randomly
+samples normalized points, averages them as the noise floor, removes those sampled
+rows, and divides the remaining normalized values by that floor; because of that
+division, `bpi_normalized` can become greater than `1`. Noise-floor sampling is
+deterministic by default (`--noise-seed 0`) so repeated runs are comparable.
+
+```powershell
+python wearable_normalizer.py --input "wearable.csv" `
+  --normalize-bpi `
   --denoise `
   --noise-sample-count 2000 `
   --noise-seed 0
-```
-
-For raw min-max without smoothing, use:
-
-```powershell
-python wearable_normalizer.py --input "wearable.csv" `
-  --bpi-smooth-window-points 1
 ```
 
 To bottom-zero the normalized wearable curve after smoothing, use:
 
 ```powershell
 python wearable_normalizer.py --input "wearable.csv" `
+  --normalize-bpi `
   --bottom-envelop
 ```
 
@@ -199,8 +215,9 @@ python csv_interval_matcher.py `
 ```
 
 By default it auto-detects time columns from `time_s`, `x_norm`, `x_value`, `x_px`,
-or `Timestamp`, and signal columns from `bpi_normalized`, `y_norm`, `y_value`, `y_px`,
-or `BPI`. The default `fusion` metric is tuned on the Test11/Test22-style data and
+or `Timestamp`, and signal columns from `bpi_normalized`, `bpi_smoothed`,
+`y_norm`, `y_value`, `y_px`, or `BPI`. The default `fusion` metric is tuned on the
+Test11/Test22-style data and
 combines ordinary Pearson correlation, smoothed derivative correlation, smoothed
 Pearson correlation, and a small morphology feature-correlation term. Absolute-value
 diagnostics such as raw normalized MAE/RMSE and Bland-Altman width remain available as
@@ -300,6 +317,45 @@ matched_paired_points_phase3_Test9-4_fusion.csv
 
 Each file contains the matched time, short offset, resampled ultrasound value, and
 matched wearable value used for the Pearson calculation.
+
+## Paired CSV Window Search
+
+`paired_window_search.py` is a standalone helper for the paired-point CSV files
+written by `csv_interval_matcher.py`. It scans same-duration windows across all paired
+CSVs in a folder and ranks the common window sizes by the average best Pearson
+correlation. By default it expects 3000 valid paired rows per CSV, tests durations from
+5 seconds upward in 1-second steps, slides each tested window start in 1-second steps,
+and keeps the printed top windows distinct by allowing at most 20% overlap within the
+same CSV:
+
+```powershell
+python paired_window_search.py "../20260814/Test6"
+```
+
+If your paired CSVs are in a dedicated folder:
+
+```powershell
+python paired_window_search.py ".tmp/matcher_query_test6_pearson_3000"
+```
+
+The CLI prints the top 5 common window sizes. For each rank, every CSV uses the same
+window duration, and the table shows that CSV's best relative time segment, matched
+absolute time segment when `matched_time_s` is available, and Pearson value.
+
+Useful options:
+
+```powershell
+python paired_window_search.py "paired_csv_folder" `
+  --min-duration-s 5 `
+  --duration-step-s 1 `
+  --start-step-s 1 `
+  --max-overlap-fraction 0.2 `
+  --top 5
+```
+
+Use `--expected-points 0` if you need to scan paired CSV files that were not generated
+with `--resample-points 3000`. Use `--max-overlap-fraction 0` when you need strictly
+non-overlapping output windows.
 
 The overlay uses the matched long time as the bottom x-axis and maps short time with
 `long_time = match_start + (short_time - short_start)`. The Matplotlib window shows a
