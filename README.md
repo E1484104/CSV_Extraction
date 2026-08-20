@@ -342,6 +342,13 @@ window duration, each printed rank uses a different window duration, and each CS
 shows only the CSV name, Pearson value, Pearson p-value, `matched_start_s`, and
 `matched_end_s`.
 
+After printing the table, the script also saves a rank-1 `char` plot to
+`paired_window_rank1_char.png` in the input folder. Each pane uses only the points
+inside the rank-1 window from the 3000-point paired CSV data. The title carries the
+window duration and point count, while each phase title shows Pearson, p-value, and
+start/end time. Use `--plot-output` to choose a PNG path or output folder,
+`--show-plot` to display the Matplotlib window, or `--no-plot` to skip this image.
+
 Useful options:
 
 ```powershell
@@ -350,6 +357,7 @@ python paired_window_search.py "paired_csv_folder" `
   --duration-step-s 1 `
   --start-step-s 0.1 `
   --show-duration-sweep `
+  --plot-output "rank1_window.png" `
   --top 5
 ```
 

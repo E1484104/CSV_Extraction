@@ -30,6 +30,23 @@ class MatchOverlaySeries:
     matched_long_values: Sequence[float] | None = None
 
 
+@dataclass(frozen=True)
+class PairedWindowPlotSeries:
+    name: str
+    times: Sequence[float]
+    short_values: Sequence[float]
+    long_values: Sequence[float]
+    short_label: str
+    long_label: str
+    rank: int
+    pearson: float
+    pearson_p: float
+    start_time: float
+    end_time: float
+    duration_s: float
+    point_count: int
+
+
 def _point_columns(rows: list[dict[str, float]]) -> tuple[str, str]:
     if rows and "x_value" in rows[0] and "y_value" in rows[0]:
         return "x_value", "y_value"
@@ -78,6 +95,41 @@ def _finite_xy(
             finite_xs.append(x_value)
             finite_ys.append(y_value)
     return finite_xs, finite_ys
+
+
+def _finite_paired_window_points(
+    xs: Sequence[float],
+    short_values: Sequence[float],
+    long_values: Sequence[float],
+) -> tuple[list[float], list[float], list[float]]:
+    finite_xs: list[float] = []
+    finite_short_values: list[float] = []
+    finite_long_values: list[float] = []
+    for x, short_value, long_value in zip(xs, short_values, long_values):
+        x_float = float(x)
+        short_float = float(short_value)
+        long_float = float(long_value)
+        if (
+            math.isfinite(x_float)
+            and math.isfinite(short_float)
+            and math.isfinite(long_float)
+        ):
+            finite_xs.append(x_float)
+            finite_short_values.append(short_float)
+            finite_long_values.append(long_float)
+    return finite_xs, finite_short_values, finite_long_values
+
+
+def _format_plot_p_value(value: float) -> str:
+    if not math.isfinite(value):
+        return "NA"
+    return f"{value:.3e}"
+
+
+def _format_plot_number(value: float) -> str:
+    if not math.isfinite(value):
+        return "NA"
+    return f"{value:.6g}"
 
 
 def _windowed_y_bounds(
@@ -539,6 +591,167 @@ def write_paired_match_points_plot(
             left=0.07,
             right=0.93,
             top=0.84,
+            bottom=0.14,
+            wspace=0.32,
+        )
+        if plot_path is not None:
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(plot_path, format="png")
+        if show:
+            plt.show()
+    finally:
+        plt.close(figure)
+
+
+def write_paired_window_rank_plot(
+    plot_path: Path | None,
+    *,
+    windows: Sequence[PairedWindowPlotSeries],
+    show: bool = False,
+) -> None:
+    prepared: list[tuple[PairedWindowPlotSeries, list[float], list[float], list[float]]] = []
+    for window in windows:
+        xs, short_ys, long_ys = _finite_paired_window_points(
+            window.times,
+            window.short_values,
+            window.long_values,
+        )
+        if xs:
+            prepared.append((window, xs, short_ys, long_ys))
+
+    if not prepared:
+        raise RuntimeError("No finite paired window points are available for plotting")
+
+    long_color = "#1f5f9e"
+    short_colors = [
+        "#c2571a",
+        "#178a63",
+        "#7b4ab8",
+        "#b33c60",
+        "#8a6f12",
+        "#156f7a",
+    ]
+    pane_count = len(prepared)
+    figure_width = max(10.0, 3.8 * pane_count)
+    figure, axes = plt.subplots(
+        1,
+        pane_count,
+        figsize=(figure_width, 5.0),
+        dpi=PLOT_DPI,
+        squeeze=False,
+    )
+
+    try:
+        if figure.canvas.manager is not None:
+            figure.canvas.manager.set_window_title("Characteristic Paired Value")
+        figure.patch.set_facecolor("white")
+        duration_s = prepared[0][0].duration_s
+        point_counts = sorted({window.point_count for window, _, _, _ in prepared})
+        point_text = (
+            f"{point_counts[0]} pts"
+            if len(point_counts) == 1
+            else f"{point_counts[0]}-{point_counts[-1]} pts"
+        )
+        figure.suptitle(
+            (
+                "Characteristic Paired Value | "
+                f"size={_format_plot_number(duration_s)} s ({point_text})"
+            ),
+            fontsize=14,
+            y=0.98,
+        )
+
+        for index, (window, xs, short_ys, long_ys) in enumerate(prepared):
+            axis = axes[0][index]
+            short_axis = axis.twinx()
+            short_axis.patch.set_alpha(0.0)
+            color = short_colors[index % len(short_colors)]
+
+            long_line = axis.plot(
+                xs,
+                long_ys,
+                color=long_color,
+                linewidth=1.35,
+                alpha=LONG_OVERLAY_ALPHA,
+                label="Wearable",
+            )
+            short_line = short_axis.plot(
+                xs,
+                short_ys,
+                color=color,
+                linewidth=1.35,
+                alpha=SHORT_OVERLAY_ALPHA,
+                label="Ultrasound",
+            )
+
+            x_min, x_max = _expanded_bounds(xs)
+            long_y_min, long_y_max = _expanded_bounds(long_ys)
+            short_y_min, short_y_max = _expanded_bounds(short_ys)
+
+            axis.set_title(
+                "\n".join(
+                    [
+                        f"phase{index + 1}",
+                        (
+                            f"Pearson r = {_format_plot_number(window.pearson)} | "
+                            f"p-value = {_format_plot_p_value(window.pearson_p)}"
+                        ),
+                        (
+                            f"start-end = {_format_plot_number(window.start_time)}"
+                            f"-{_format_plot_number(window.end_time)} s"
+                        ),
+                    ]
+                ),
+                fontsize=9,
+                pad=38,
+            )
+            axis.set_xlim(x_min, x_max)
+            axis.set_ylim(long_y_min, long_y_max)
+            short_axis.set_ylim(short_y_min, short_y_max)
+            axis.set_xlabel("Sample Time (s)", fontsize=9)
+            if index == 0:
+                axis.set_ylabel(window.long_label, color=long_color, fontsize=9)
+            else:
+                axis.tick_params(axis="y", labelleft=False)
+            if index == pane_count - 1:
+                short_axis.set_ylabel(window.short_label, fontsize=9)
+            else:
+                short_axis.tick_params(axis="y", labelright=False)
+
+            axis.xaxis.set_major_locator(MaxNLocator(nbins=5))
+            axis.yaxis.set_major_locator(MaxNLocator(nbins=5))
+            short_axis.yaxis.set_major_locator(MaxNLocator(nbins=5))
+            axis.grid(True, color="#dfe4ea", linewidth=0.8)
+
+            axis.spines["top"].set_visible(False)
+            axis.spines["right"].set_visible(False)
+            axis.spines["left"].set_color(long_color)
+            axis.spines["bottom"].set_color("#38404a")
+            short_axis.spines["top"].set_visible(False)
+            short_axis.spines["right"].set_color("#38404a")
+            axis.tick_params(axis="x", colors="#2e343c", labelsize=8)
+            axis.tick_params(axis="y", colors=long_color, labelsize=8)
+            short_axis.tick_params(axis="y", colors="#2e343c", labelsize=8)
+
+            lines = [*long_line, *short_line]
+            labels = [line.get_label() for line in lines]
+            axis.legend(
+                lines,
+                labels,
+                loc="lower center",
+                bbox_to_anchor=(0.5, 1.01),
+                ncol=2,
+                frameon=False,
+                fontsize=8,
+                borderaxespad=0.0,
+                columnspacing=1.0,
+                handlelength=1.7,
+            )
+
+        figure.subplots_adjust(
+            left=0.07,
+            right=0.93,
+            top=0.66,
             bottom=0.14,
             wspace=0.32,
         )

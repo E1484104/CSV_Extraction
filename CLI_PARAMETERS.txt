@@ -263,11 +263,15 @@ python paired_window_search.py "paired_csv_folder"
 - --start-step-s：窗口起点滑动步长 0.1 秒。
 - --show-duration-sweep：额外打印每个被测试窗口长度的 avg/min/max Pearson，用于确认 5..29 秒都已参与排序。
 - --top：输出前 5 个统一窗口长度；每个 rank 的 duration_s 不同。
+- --plot-output：rank1 的 char 图 PNG 路径或输出文件夹；默认保存到输入文件夹的 paired_window_rank1_char.png。
+- --show-plot：保存后同时弹出 rank1 的 Matplotlib 图窗。
+- --no-plot：不生成 rank1 图像。
 
 输出说明：
 - 默认输出为对齐表格，每个 CSV 占一行。
 - 每行只显示 rank、duration_s、avg_pearson、csv、pearson、p_value、matched_start_s、matched_end_s。
 - 同一个 rank 下，所有 CSV 都使用相同 duration_s；不同 rank 的 duration_s 互不相同。
+- 运行结束后默认生成 rank1 的 char 图：每个子图只使用对应 paired CSV 的 3000 点中落在该 rank1 窗口内的点；大标题标注窗口大小和点数，小标题附近标注 Pearson、p-value、起始/结束时间。
 - 不限制不同 rank 的时间选段是否重叠；区域重叠也会参与排序。
 
 

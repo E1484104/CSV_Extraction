@@ -12,6 +12,7 @@ from scipy import stats
 
 
 DEFAULT_PATTERN = "matched_paired_points*.csv"
+DEFAULT_RANK1_PLOT_FILENAME = "paired_window_rank1_char.png"
 DEFAULT_TIME_CANDIDATES = [
     "short_offset_s",
     "matched_time_s",
@@ -547,6 +548,82 @@ def print_duration_sweep(results: list[CommonDurationResult]) -> None:
         )
 
 
+def paired_plot_output_path(input_dir: Path, plot_output: Path | None) -> Path:
+    if plot_output is None:
+        return input_dir / DEFAULT_RANK1_PLOT_FILENAME
+    if plot_output.suffix:
+        return plot_output
+    return plot_output / DEFAULT_RANK1_PLOT_FILENAME
+
+
+def paired_axis_label(column: str, default_label: str) -> str:
+    key = column_key(column)
+    if key in {"short_value", "ultrasound_value"}:
+        return "Ultrasound paired value"
+    if key in {"long_value", "wearable_value", "bpi_normalized", "bpi"}:
+        return "Wearable paired value"
+    return default_label
+
+
+def window_plot_times(window: WindowResult) -> tuple[np.ndarray, float, float]:
+    window_slice = slice(window.start_index, window.end_index_exclusive)
+    if window.series.absolute_times is not None:
+        times = window.series.absolute_times[window_slice]
+        start_time = (
+            window.absolute_start_s
+            if window.absolute_start_s is not None
+            else float(times[0])
+        )
+        end_time = (
+            window.absolute_end_s
+            if window.absolute_end_s is not None
+            else float(times[-1])
+        )
+        return times, start_time, end_time
+
+    times = window.series.times[window_slice]
+    return times, window.start_s, window.end_s
+
+
+def write_rank1_paired_window_plot(
+    result: CommonDurationResult,
+    *,
+    plot_path: Path,
+    show: bool,
+) -> None:
+    from plotting import PairedWindowPlotSeries, write_paired_window_rank_plot
+
+    plot_windows: list[PairedWindowPlotSeries] = []
+    for window in result.windows:
+        window_slice = slice(window.start_index, window.end_index_exclusive)
+        times, start_time, end_time = window_plot_times(window)
+        plot_windows.append(
+            PairedWindowPlotSeries(
+                name=window.series.path.name,
+                times=times,
+                short_values=window.series.left_values[window_slice],
+                long_values=window.series.right_values[window_slice],
+                short_label=paired_axis_label(
+                    window.series.left_column,
+                    window.series.left_column,
+                ),
+                long_label=paired_axis_label(
+                    window.series.right_column,
+                    window.series.right_column,
+                ),
+                rank=1,
+                pearson=window.pearson,
+                pearson_p=window.pearson_p,
+                start_time=start_time,
+                end_time=end_time,
+                duration_s=result.duration_s,
+                point_count=window.points,
+            )
+        )
+
+    write_paired_window_rank_plot(plot_path, windows=plot_windows, show=show)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -623,6 +700,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print one summary row for every tested window duration.",
     )
     parser.add_argument("--top", type=int, default=5, help="Number of ranks to print. Default: 5.")
+    parser.add_argument(
+        "--plot-output",
+        type=Path,
+        help=(
+            "PNG path, or folder, for the rank-1 char plot. "
+            f"Default: INPUT/{DEFAULT_RANK1_PLOT_FILENAME}."
+        ),
+    )
+    parser.add_argument(
+        "--show-plot",
+        action="store_true",
+        help="Show the rank-1 char Matplotlib window after saving it.",
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip saving and showing the rank-1 char plot.",
+    )
     return parser
 
 
@@ -671,6 +766,18 @@ def main(argv: list[str] | None = None) -> int:
     print_results(results)
     if args.show_duration_sweep:
         print_duration_sweep(scored_durations)
+    if not args.no_plot:
+        try:
+            plot_path = paired_plot_output_path(args.input, args.plot_output)
+            write_rank1_paired_window_plot(
+                results[0],
+                plot_path=plot_path,
+                show=args.show_plot,
+            )
+        except Exception as exc:
+            print(f"error: failed to write rank1 plot: {exc}", file=sys.stderr)
+            return 1
+        print(f"\nwrote rank1 char plot {plot_path}")
     return 0
 
 
