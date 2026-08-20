@@ -1237,8 +1237,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resample-points",
         type=int,
-        default=300,
-        help="Resample each candidate window to this many points before scoring. Default: 300.",
+        default=3000,
+        help="Resample each candidate window to this many points before scoring. Default: 3000.",
     )
     parser.add_argument(
         "--smooth-window-points",

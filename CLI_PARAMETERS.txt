@@ -227,7 +227,7 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" --top 1 --p
 - --independent：使用 short-dir 时不做有序非重叠全局匹配，而是每个短 CSV 独立输出 top 匹配。
 - --ordered-gap-s：有序非重叠匹配时，区间之间额外要求的间隔。
 - --sample-method：nearest 或 linear；默认 nearest。
-- --resample-points：每个候选窗口重采样为多少点后评分；默认 300。
+- --resample-points：每个候选窗口重采样为多少点后评分；默认 3000。
 - --smooth-window-points：平滑指标使用的移动平均窗口点数；默认 15。
 - --start-step-rows：每隔多少个长 CSV 点滑动一次；默认 1。
 - --start-step-s：固定时间步长滑动；设置后覆盖 start-step-rows。
