@@ -1225,8 +1225,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--metric",
         choices=["all", *METRICS],
-        default="fusion",
-        help="Scoring metric. Use all to compare every supported metric. Default: fusion.",
+        default="pearson",
+        help="Scoring metric. Use all to compare every supported metric. Default: pearson.",
     )
     parser.add_argument(
         "--sample-method",
