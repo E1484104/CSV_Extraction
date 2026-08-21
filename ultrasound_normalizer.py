@@ -301,8 +301,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--duration-s",
         type=float,
-        default=30.0,
-        help="Map each CSV's x range to 0..duration seconds. Default: 30.",
+        default=29.8,
+        help="Map each CSV's x range to 0..duration seconds. Default: 29.8.",
     )
     parser.add_argument(
         "--no-invert-y",

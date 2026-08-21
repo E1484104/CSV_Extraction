@@ -402,8 +402,8 @@ Each output CSV preserves the original columns and adds:
 x_norm,y_norm
 ```
 
-By default, each file's `x_px` range is mapped to `x_norm=0..30`, because each stitched
-long image records 30 seconds. The y values are normalized together across all files.
+By default, each file's `x_px` range is mapped to `x_norm=0..29.8`. The y values are
+normalized together across all files.
 `y_norm` is inverted so image pixel coordinates become normal plot coordinates, with
 larger values higher on the graph.
 
@@ -414,7 +414,7 @@ python ultrasound_normalizer.py --input "csv" --output "csv_normalized" `
   --x-column x_px --y-column y_px
 
 python ultrasound_normalizer.py --input "csv" --output "csv_normalized" `
-  --duration-s 30
+  --duration-s 29.8
 
 python ultrasound_normalizer.py --input "csv" --output "csv_normalized" `
   --recursive

@@ -170,7 +170,7 @@ python ultrasound_normalizer.py --root "../Tester1"
 归一化设置：
 - --x-column：指定用于横轴的列；默认优先 x_px，其次 x_value。
 - --y-column：指定用于纵轴的列；默认优先 y_px，其次 y_value。
-- --duration-s：把每个 CSV 自己的横轴范围映射到 0..duration_s，默认 30 秒。
+- --duration-s：把每个 CSV 自己的横轴范围映射到 0..duration_s，默认 29.8 秒。
 - --no-invert-y：不反转 y 轴；默认会把图像像素 y 轴转换成正常图表方向。
 
 

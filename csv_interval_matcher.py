@@ -536,10 +536,10 @@ def score_from_diagnostics(metric: str, diagnostics: WindowDiagnostics) -> float
         )
     if metric == "fusion":
         return (
-            0.222222 * safe(diagnostics.smooth_pearson)
-            + 0.333333 * safe(diagnostics.pearson)
-            + 0.333333 * safe(diagnostics.smooth_derivative)
-            + 0.111112 * safe(diagnostics.feature_corr)
+            0.700000 * safe(diagnostics.sign_agreement)
+            + 0.150000 * safe(diagnostics.smooth_derivative)
+            + 0.100000 * safe(diagnostics.pearson)
+            + 0.050000 * safe(diagnostics.derivative)
         )
     raise RuntimeError(f"Unsupported metric: {metric}")
 
