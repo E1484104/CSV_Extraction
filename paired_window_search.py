@@ -10,6 +10,8 @@ from pathlib import Path
 import numpy as np
 from scipy import stats
 
+from config import BPI_PROCESSED_DIRNAME
+
 
 DEFAULT_PATTERN = "matched_paired_points*.csv"
 DEFAULT_RANK1_PLOT_FILENAME = "paired_window_rank1_char.png"
@@ -41,6 +43,10 @@ class PairedSeries:
     source_rows: int
     valid_rows: int
     duplicate_time_rows: int
+    short_csv: str | None
+    metric: str | None
+    match_start_time: float | None
+    match_end_time: float | None
 
     @property
     def duration_s(self) -> float:
@@ -86,6 +92,13 @@ def parse_float(value: str | None) -> float | None:
     if not math.isfinite(number):
         return None
     return number
+
+
+def parse_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    return text or None
 
 
 def column_key(name: str) -> str:
@@ -182,9 +195,21 @@ def read_paired_series(
         right_values: list[float] = []
         source_rows = 0
         valid_rows = 0
+        short_csv = None
+        metric = None
+        match_start_time = None
+        match_end_time = None
 
         for row in reader:
             source_rows += 1
+            if short_csv is None:
+                short_csv = parse_text(row.get("short_csv"))
+            if metric is None:
+                metric = parse_text(row.get("metric"))
+            if match_start_time is None:
+                match_start_time = parse_float(row.get("match_start_time"))
+            if match_end_time is None:
+                match_end_time = parse_float(row.get("match_end_time"))
             time_value = parse_float(row.get(chosen_time))
             absolute_time_value = (
                 parse_float(row.get(chosen_absolute_time))
@@ -247,6 +272,10 @@ def read_paired_series(
         source_rows=source_rows,
         valid_rows=valid_rows,
         duplicate_time_rows=duplicate_rows,
+        short_csv=short_csv,
+        metric=metric,
+        match_start_time=match_start_time,
+        match_end_time=match_end_time,
     )
 
 
@@ -582,27 +611,117 @@ def window_plot_times(window: WindowResult) -> tuple[np.ndarray, float, float]:
         return times, start_time, end_time
 
     times = window.series.times[window_slice]
+    if window.series.match_start_time is not None:
+        absolute_times = times + window.series.match_start_time
+        return (
+            absolute_times,
+            window.series.match_start_time + window.start_s,
+            window.series.match_start_time + window.end_s,
+        )
     return times, window.start_s, window.end_s
+
+
+def series_plot_times(series: PairedSeries) -> np.ndarray:
+    if series.absolute_times is not None:
+        return series.absolute_times
+    if series.match_start_time is not None:
+        return series.times + series.match_start_time
+    return series.times
+
+
+def unique_non_none(values: list[str | None]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value is None or value in seen:
+            continue
+        output.append(value)
+        seen.add(value)
+    return output
+
+
+def resolve_overlay_long_path(
+    input_dir: Path,
+    *,
+    overlay_long: Path | None,
+    overlay_long_dir: Path | None,
+    overlay_long_pattern: str,
+) -> Path:
+    if overlay_long is not None:
+        if not overlay_long.is_file():
+            raise RuntimeError(f"--overlay-long is not a file: {overlay_long}")
+        return overlay_long
+
+    candidate_dirs = (
+        [overlay_long_dir]
+        if overlay_long_dir is not None
+        else [
+            input_dir / BPI_PROCESSED_DIRNAME,
+            input_dir.parent / BPI_PROCESSED_DIRNAME,
+        ]
+    )
+    seen_dirs: set[Path] = set()
+    for directory in candidate_dirs:
+        if directory is None:
+            continue
+        resolved = directory.resolve()
+        if resolved in seen_dirs or not directory.is_dir():
+            continue
+        seen_dirs.add(resolved)
+        paths = sorted(path for path in directory.glob(overlay_long_pattern) if path.is_file())
+        if len(paths) == 1:
+            return paths[0]
+        if len(paths) > 1:
+            candidates = ", ".join(path.name for path in paths)
+            raise RuntimeError(
+                "Multiple overlay long CSV files were found in "
+                f"{directory}: {candidates}. Use --overlay-long to choose one."
+            )
+
+    raise RuntimeError(
+        "Could not find the interval matcher long CSV for the overlay. "
+        "Use --overlay-long or --overlay-long-dir."
+    )
+
+
+def read_overlay_long_series(args: argparse.Namespace):
+    from csv_interval_matcher import read_series
+
+    long_path = resolve_overlay_long_path(
+        args.input,
+        overlay_long=args.overlay_long,
+        overlay_long_dir=args.overlay_long_dir,
+        overlay_long_pattern=args.overlay_long_pattern,
+    )
+    return read_series(
+        long_path,
+        x_column=args.overlay_long_x_column,
+        y_column=args.overlay_long_y_column,
+        sample_rate_hz=args.overlay_long_sample_rate,
+    )
 
 
 def write_rank1_paired_window_plot(
     result: CommonDurationResult,
     *,
     plot_path: Path,
+    overlay_long,
     show: bool,
 ) -> None:
-    from plotting import PairedWindowPlotSeries, write_paired_window_rank_plot
+    from plotting import PairedWindowZoomSeries, write_paired_window_overlay_zoom_plot
 
-    plot_windows: list[PairedWindowPlotSeries] = []
+    plot_windows: list[PairedWindowZoomSeries] = []
     for window in result.windows:
         window_slice = slice(window.start_index, window.end_index_exclusive)
         times, start_time, end_time = window_plot_times(window)
         plot_windows.append(
-            PairedWindowPlotSeries(
+            PairedWindowZoomSeries(
                 name=window.series.path.name,
-                times=times,
-                short_values=window.series.left_values[window_slice],
-                long_values=window.series.right_values[window_slice],
+                overlay_times=series_plot_times(window.series),
+                overlay_short_values=window.series.left_values,
+                window_times=times,
+                window_short_values=window.series.left_values[window_slice],
+                window_long_values=window.series.right_values[window_slice],
                 short_label=paired_axis_label(
                     window.series.left_column,
                     window.series.left_column,
@@ -621,7 +740,16 @@ def write_rank1_paired_window_plot(
             )
         )
 
-    write_paired_window_rank_plot(plot_path, windows=plot_windows, show=show)
+    metrics = unique_non_none([window.series.metric for window in result.windows])
+    write_paired_window_overlay_zoom_plot(
+        plot_path,
+        overlay_long_times=overlay_long.times,
+        overlay_long_values=overlay_long.values,
+        overlay_long_label=paired_axis_label(overlay_long.y_column, overlay_long.y_column),
+        windows=plot_windows,
+        metric=metrics[0] if len(metrics) == 1 else None,
+        show=show,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -704,19 +832,47 @@ def build_parser() -> argparse.ArgumentParser:
         "--plot-output",
         type=Path,
         help=(
-            "PNG path, or folder, for the rank-1 char plot. "
+            "PNG path, or folder, for the rank-1 overlay/char zoom plot. "
             f"Default: INPUT/{DEFAULT_RANK1_PLOT_FILENAME}."
         ),
     )
     parser.add_argument(
+        "--overlay-long",
+        type=Path,
+        help=(
+            "Original long CSV used by csv_interval_matcher.py for the top overlay. "
+            "Defaults to INPUT/BPI_Processed/*.csv, then INPUT_PARENT/BPI_Processed/*.csv."
+        ),
+    )
+    parser.add_argument(
+        "--overlay-long-dir",
+        type=Path,
+        help="Folder containing the original long CSV for the top overlay.",
+    )
+    parser.add_argument(
+        "--overlay-long-pattern",
+        default="*.csv",
+        help="Filename pattern for --overlay-long-dir. Default: *.csv.",
+    )
+    parser.add_argument(
+        "--overlay-long-x-column",
+        help="Long CSV time/x column for the top overlay. Use row_index to synthesize time from rows.",
+    )
+    parser.add_argument("--overlay-long-y-column", help="Long CSV signal/y column for the top overlay.")
+    parser.add_argument(
+        "--overlay-long-sample-rate",
+        type=float,
+        help="Hz used when --overlay-long-x-column row_index is selected.",
+    )
+    parser.add_argument(
         "--show-plot",
         action="store_true",
-        help="Show the rank-1 char Matplotlib window after saving it.",
+        help="Show the rank-1 overlay/char Matplotlib window after saving it.",
     )
     parser.add_argument(
         "--no-plot",
         action="store_true",
-        help="Skip saving and showing the rank-1 char plot.",
+        help="Skip saving and showing the rank-1 overlay/char plot.",
     )
     return parser
 
@@ -769,15 +925,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_plot:
         try:
             plot_path = paired_plot_output_path(args.input, args.plot_output)
+            overlay_long = read_overlay_long_series(args)
             write_rank1_paired_window_plot(
                 results[0],
                 plot_path=plot_path,
+                overlay_long=overlay_long,
                 show=args.show_plot,
             )
         except Exception as exc:
             print(f"error: failed to write rank1 plot: {exc}", file=sys.stderr)
             return 1
-        print(f"\nwrote rank1 char plot {plot_path}")
+        print(f"\nwrote rank1 overlay/char plot {plot_path}")
     return 0
 
 

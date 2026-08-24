@@ -263,7 +263,10 @@ python paired_window_search.py "paired_csv_folder"
 - --start-step-s：窗口起点滑动步长 0.1 秒。
 - --show-duration-sweep：额外打印每个被测试窗口长度的 avg/min/max Pearson，用于确认 5..29 秒都已参与排序。
 - --top：输出前 5 个统一窗口长度；每个 rank 的 duration_s 不同。
-- --plot-output：rank1 的 char 图 PNG 路径或输出文件夹；默认保存到输入文件夹的 paired_window_rank1_char.png。
+- --plot-output：rank1 的 overlay/char 放大组合图 PNG 路径或输出文件夹；默认保存到输入文件夹的 paired_window_rank1_char.png。
+- --overlay-long：interval_matcher 上方 overlay 所用的原始 long CSV；默认自动找 INPUT/BPI_Processed/*.csv，然后找 INPUT_PARENT/BPI_Processed/*.csv。
+- --overlay-long-dir / --overlay-long-pattern：指定原始 long CSV 所在文件夹和匹配模式。
+- --overlay-long-x-column / --overlay-long-y-column / --overlay-long-sample-rate：原始 long CSV 的时间列、信号列和 row_index 采样率设置。
 - --show-plot：保存后同时弹出 rank1 的 Matplotlib 图窗。
 - --no-plot：不生成 rank1 图像。
 
@@ -271,7 +274,7 @@ python paired_window_search.py "paired_csv_folder"
 - 默认输出为对齐表格，每个 CSV 占一行。
 - 每行只显示 rank、duration_s、avg_pearson、csv、pearson、p_value、matched_start_s、matched_end_s。
 - 同一个 rank 下，所有 CSV 都使用相同 duration_s；不同 rank 的 duration_s 互不相同。
-- 运行结束后默认生成 rank1 的 char 图：每个子图只使用对应 paired CSV 的 3000 点中落在该 rank1 窗口内的点；大标题标注窗口大小和点数，小标题附近标注 Pearson、p-value、起始/结束时间。
+- 运行结束后默认生成 rank1 的 overlay/char 放大组合图：上方复现 csv_interval_matcher 结果图中的上方 overlay，即原始 long CSV 全时间轴叠加各 phase 的 matched short 曲线，并标出所选 rank1 窗口；下方分别展示对应窗口内的 char 图，中间用两条黑线连接表示放大；标题标注窗口大小和点数，子图标题标注 Pearson、p-value、起始/结束时间。
 - 不限制不同 rank 的时间选段是否重叠；区域重叠也会参与排序。
 
 

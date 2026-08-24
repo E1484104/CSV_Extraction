@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 
 from matplotlib import pyplot as plt
+from matplotlib.patches import ConnectionPatch, Rectangle
 from matplotlib.ticker import MaxNLocator
 
 
@@ -36,6 +37,25 @@ class PairedWindowPlotSeries:
     times: Sequence[float]
     short_values: Sequence[float]
     long_values: Sequence[float]
+    short_label: str
+    long_label: str
+    rank: int
+    pearson: float
+    pearson_p: float
+    start_time: float
+    end_time: float
+    duration_s: float
+    point_count: int
+
+
+@dataclass(frozen=True)
+class PairedWindowZoomSeries:
+    name: str
+    overlay_times: Sequence[float]
+    overlay_short_values: Sequence[float]
+    window_times: Sequence[float]
+    window_short_values: Sequence[float]
+    window_long_values: Sequence[float]
     short_label: str
     long_label: str
     rank: int
@@ -593,6 +613,333 @@ def write_paired_match_points_plot(
             top=0.84,
             bottom=0.14,
             wspace=0.32,
+        )
+        if plot_path is not None:
+            plot_path.parent.mkdir(parents=True, exist_ok=True)
+            figure.savefig(plot_path, format="png")
+        if show:
+            plt.show()
+    finally:
+        plt.close(figure)
+
+
+def _common_axis_label(labels: Sequence[str], fallback: str) -> str:
+    unique_labels = sorted({label for label in labels if label})
+    if len(unique_labels) == 1:
+        return unique_labels[0]
+    return fallback
+
+
+def write_paired_window_overlay_zoom_plot(
+    plot_path: Path | None,
+    *,
+    overlay_long_times: Sequence[float],
+    overlay_long_values: Sequence[float],
+    overlay_long_label: str,
+    windows: Sequence[PairedWindowZoomSeries],
+    metric: str | None = None,
+    show: bool = False,
+) -> None:
+    prepared: list[
+        tuple[
+            PairedWindowZoomSeries,
+            list[float],
+            list[float],
+            list[float],
+            list[float],
+            list[float],
+        ]
+    ] = []
+    long_xs, long_ys = _finite_xy(overlay_long_times, overlay_long_values)
+    if not long_xs:
+        raise RuntimeError("No finite long CSV points are available for plotting")
+
+    for window in windows:
+        overlay_xs, overlay_short_ys = _finite_xy(
+            window.overlay_times,
+            window.overlay_short_values,
+        )
+        window_xs, window_short_ys, window_long_ys = _finite_paired_window_points(
+            window.window_times,
+            window.window_short_values,
+            window.window_long_values,
+        )
+        if overlay_xs and window_xs:
+            prepared.append(
+                (
+                    window,
+                    overlay_xs,
+                    overlay_short_ys,
+                    window_xs,
+                    window_short_ys,
+                    window_long_ys,
+                )
+            )
+
+    if not prepared:
+        raise RuntimeError("No finite paired window points are available for plotting")
+
+    long_color = "#1f5f9e"
+    short_colors = [
+        "#c2571a",
+        "#178a63",
+        "#7b4ab8",
+        "#b33c60",
+        "#8a6f12",
+        "#156f7a",
+    ]
+    pane_count = len(prepared)
+    figure_width = max(11.0, 3.9 * pane_count)
+    figure = plt.figure(figsize=(figure_width, 8.2), dpi=PLOT_DPI)
+    grid = figure.add_gridspec(
+        2,
+        pane_count,
+        height_ratios=[2.25, 1.12],
+        hspace=0.55,
+        wspace=0.34,
+    )
+    overlay_axis = figure.add_subplot(grid[0, :])
+
+    try:
+        if figure.canvas.manager is not None:
+            figure.canvas.manager.set_window_title("Rank-1 Window Overlay")
+        figure.patch.set_facecolor("white")
+        overlay_axis.set_facecolor("#fbfcfe")
+
+        overlay_short_axis = overlay_axis.twinx()
+        overlay_short_axis.patch.set_alpha(0.0)
+
+        all_overlay_short_ys = [
+            y
+            for _, _, overlay_short_ys, _, _, _ in prepared
+            for y in overlay_short_ys
+        ]
+        x_min, x_max = _expanded_bounds(long_xs)
+        long_y_min, long_y_max = _expanded_bounds(long_ys)
+        short_y_min, short_y_max = _expanded_bounds(all_overlay_short_ys)
+
+        long_line = overlay_axis.plot(
+            long_xs,
+            long_ys,
+            color=long_color,
+            linewidth=1.5,
+            alpha=LONG_OVERLAY_ALPHA,
+            label="Wearable",
+            zorder=2,
+        )
+
+        for index, (
+            window,
+            overlay_xs,
+            overlay_short_ys,
+            _,
+            _,
+            _,
+        ) in enumerate(prepared):
+            color = short_colors[index % len(short_colors)]
+            overlay_short_axis.plot(
+                overlay_xs,
+                overlay_short_ys,
+                color=color,
+                linewidth=1.8,
+                alpha=SHORT_OVERLAY_ALPHA,
+                label=f"phase{index + 1}",
+                zorder=3,
+            )
+            overlay_axis.axvspan(
+                window.start_time,
+                window.end_time,
+                color=color,
+                alpha=0.065,
+                linewidth=0,
+                zorder=1,
+            )
+
+        duration_s = prepared[0][0].duration_s
+        point_counts = sorted({window.point_count for window, _, _, _, _, _ in prepared})
+        point_text = (
+            f"{point_counts[0]} pts"
+            if len(point_counts) == 1
+            else f"{point_counts[0]}-{point_counts[-1]} pts"
+        )
+        title = (
+            "Rank-1 Selected Window on Matched Overlay | "
+            f"size={_format_plot_number(duration_s)} s ({point_text})"
+        )
+        if metric:
+            title += f" | metric={metric}"
+        overlay_axis.set_title(
+            title,
+            fontsize=14,
+            pad=14,
+        )
+        overlay_axis.set_ylabel(
+            overlay_long_label,
+            color=long_color,
+        )
+        overlay_short_axis.set_ylabel(
+            _common_axis_label(
+                [window.short_label for window, _, _, _, _, _ in prepared],
+                "Ultrasound paired value",
+            )
+        )
+        overlay_axis.set_xlim(x_min, x_max)
+        overlay_axis.set_ylim(long_y_min, long_y_max)
+        overlay_short_axis.set_ylim(short_y_min, short_y_max)
+
+        overlay_axis.xaxis.set_major_locator(MaxNLocator(nbins=10))
+        overlay_axis.yaxis.set_major_locator(MaxNLocator(nbins=6))
+        overlay_short_axis.yaxis.set_major_locator(MaxNLocator(nbins=6))
+        overlay_axis.grid(True, color="#dfe4ea", linewidth=0.8)
+
+        overlay_axis.spines["top"].set_visible(False)
+        overlay_axis.spines["right"].set_visible(False)
+        overlay_axis.spines["left"].set_color(long_color)
+        overlay_axis.spines["bottom"].set_color("#38404a")
+        overlay_short_axis.spines["top"].set_visible(False)
+        overlay_short_axis.spines["right"].set_color("#38404a")
+        overlay_axis.tick_params(axis="x", colors="#2e343c", labelsize=9)
+        overlay_axis.tick_params(axis="y", colors=long_color, labelsize=9)
+        overlay_short_axis.tick_params(axis="y", colors="#2e343c", labelsize=9)
+
+        legend_lines = list(long_line)
+        legend_labels = [line.get_label() for line in legend_lines]
+        short_lines, short_labels = overlay_short_axis.get_legend_handles_labels()
+        overlay_axis.legend(
+            [*legend_lines, *short_lines],
+            [*legend_labels, *short_labels],
+            loc="best",
+            frameon=False,
+            fontsize=8,
+            ncol=min(4, pane_count + 1),
+        )
+
+        detail_axes = []
+        for index, (
+            window,
+            _,
+            _,
+            window_xs,
+            window_short_ys,
+            window_long_ys,
+        ) in enumerate(prepared):
+            detail_axis = figure.add_subplot(grid[1, index])
+            detail_short_axis = detail_axis.twinx()
+            detail_short_axis.patch.set_alpha(0.0)
+            detail_axes.append(detail_axis)
+
+            color = short_colors[index % len(short_colors)]
+            detail_axis.set_facecolor("#fbfcfe")
+            detail_axis.plot(
+                window_xs,
+                window_long_ys,
+                color=long_color,
+                linewidth=1.35,
+                alpha=LONG_OVERLAY_ALPHA,
+                label="Wearable",
+                zorder=2,
+            )
+            detail_short_axis.plot(
+                window_xs,
+                window_short_ys,
+                color=color,
+                linewidth=1.55,
+                alpha=SHORT_OVERLAY_ALPHA,
+                label="Ultrasound",
+                zorder=3,
+            )
+
+            duration = max(0.0, window.end_time - window.start_time)
+            padding = duration * 0.03 if duration > 0 else 1.0
+            detail_x_min = window.start_time - padding
+            detail_x_max = window.end_time + padding
+            detail_axis.set_xlim(detail_x_min, detail_x_max)
+            detail_axis.set_ylim(*_expanded_bounds(window_long_ys))
+            detail_short_axis.set_ylim(*_expanded_bounds(window_short_ys))
+
+            detail_axis.set_title(
+                "\n".join(
+                    [
+                        f"phase{index + 1}",
+                        (
+                            f"Pearson r = {_format_plot_number(window.pearson)} | "
+                            f"p-value = {_format_plot_p_value(window.pearson_p)}"
+                        ),
+                        (
+                            f"start-end = {_format_plot_number(window.start_time)}"
+                            f"-{_format_plot_number(window.end_time)} s"
+                        ),
+                    ]
+                ),
+                fontsize=9,
+                pad=10,
+            )
+            detail_axis.set_xlabel("Sample Time (s)", fontsize=9)
+            if index == 0:
+                detail_axis.set_ylabel(window.long_label, color=long_color, fontsize=9)
+            else:
+                detail_axis.tick_params(axis="y", labelleft=False)
+            if index == pane_count - 1:
+                detail_short_axis.set_ylabel(window.short_label, fontsize=9)
+            else:
+                detail_short_axis.tick_params(axis="y", labelright=False)
+
+            detail_axis.xaxis.set_major_locator(MaxNLocator(nbins=5))
+            detail_axis.yaxis.set_major_locator(MaxNLocator(nbins=5))
+            detail_short_axis.yaxis.set_major_locator(MaxNLocator(nbins=5))
+            detail_axis.grid(True, color="#dfe4ea", linewidth=0.8)
+
+            detail_axis.spines["top"].set_visible(False)
+            detail_axis.spines["right"].set_visible(False)
+            detail_axis.spines["left"].set_color(long_color)
+            detail_axis.spines["bottom"].set_color("#38404a")
+            detail_short_axis.spines["top"].set_visible(False)
+            detail_short_axis.spines["right"].set_color("#38404a")
+            detail_axis.tick_params(axis="x", colors="#2e343c", labelsize=8)
+            detail_axis.tick_params(axis="y", colors=long_color, labelsize=8)
+            detail_short_axis.tick_params(axis="y", colors="#2e343c", labelsize=8)
+
+            overlay_axis.add_patch(
+                Rectangle(
+                    (window.start_time, 0.0),
+                    window.end_time - window.start_time,
+                    1.0,
+                    transform=overlay_axis.get_xaxis_transform(),
+                    fill=False,
+                    edgecolor=color,
+                    linewidth=1.15,
+                    linestyle="--",
+                    zorder=5,
+                )
+            )
+
+        overlay_bottom_y = overlay_axis.get_ylim()[0]
+        for (window, _, _, _, _, _), detail_axis in zip(prepared, detail_axes):
+            for overlay_x, detail_x in (
+                (window.start_time, 0.0),
+                (window.end_time, 1.0),
+            ):
+                figure.add_artist(
+                    ConnectionPatch(
+                        xyA=(overlay_x, overlay_bottom_y),
+                        xyB=(detail_x, 1.0),
+                        coordsA="data",
+                        coordsB="axes fraction",
+                        axesA=overlay_axis,
+                        axesB=detail_axis,
+                        color="black",
+                        linewidth=1.1,
+                        alpha=0.86,
+                        clip_on=False,
+                        zorder=4,
+                    )
+                )
+
+        figure.subplots_adjust(
+            left=0.07,
+            right=0.93,
+            top=0.93,
+            bottom=0.08,
         )
         if plot_path is not None:
             plot_path.parent.mkdir(parents=True, exist_ok=True)

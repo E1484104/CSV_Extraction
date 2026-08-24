@@ -342,12 +342,16 @@ window duration, each printed rank uses a different window duration, and each CS
 shows only the CSV name, Pearson value, Pearson p-value, `matched_start_s`, and
 `matched_end_s`.
 
-After printing the table, the script also saves a rank-1 `char` plot to
-`paired_window_rank1_char.png` in the input folder. Each pane uses only the points
-inside the rank-1 window from the 3000-point paired CSV data. The title carries the
-window duration and point count, while each phase title shows Pearson, p-value, and
-start/end time. Use `--plot-output` to choose a PNG path or output folder,
-`--show-plot` to display the Matplotlib window, or `--no-plot` to skip this image.
+After printing the table, the script also saves a rank-1 overlay/detail plot to
+`paired_window_rank1_char.png` in the input folder. The top pane recreates the upper
+overlay from `csv_interval_matcher.py`: the original long CSV is drawn across its full
+time axis, and each matched short curve is drawn at its matched interval. The selected
+rank-1 window inside each matched interval is highlighted and connected to the lower
+window-level `char` pane. By default the long CSV is discovered from
+`INPUT/BPI_Processed/*.csv`, then `INPUT_PARENT/BPI_Processed/*.csv`; use
+`--overlay-long` or `--overlay-long-dir` if the paired CSV files are stored elsewhere.
+Use `--plot-output` to choose a PNG path or output folder, `--show-plot` to display the
+Matplotlib window, or `--no-plot` to skip this image.
 
 Useful options:
 
