@@ -928,8 +928,8 @@ def write_paired_window_overlay_zoom_plot(
                         axesA=overlay_axis,
                         axesB=detail_axis,
                         color="black",
-                        linewidth=1.1,
-                        alpha=0.86,
+                        linewidth=0.75,
+                        alpha=0.35,
                         clip_on=False,
                         zorder=4,
                     )
