@@ -208,7 +208,7 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" --top 1 --p
 - 对比图中，底部 x 轴是完整 long 时间；short 通过 long_time = match_start + (short_time - short_start) 映射到同一条时间轴。
 - 对比图窗口上方是完整 long 叠加图，下方最多 4 张匹配窗口分块细节图；下方细节图会分别按局部可见窗口缩放 long/short 的 y 轴范围。
 - 对比图使用双 y 轴：左侧是完整 long 数值列，右侧是所有 short 数值列，匹配窗口会用淡色背景标出；short 线半透明显示，方便看清下方 long 线。
-- 默认 metric=pearson；fusion 仍可手动选择，基于 Test11/Test22 模式调参，融合普通 Pearson、平滑导数相关、平滑 Pearson 和少量形态特征相关。
+- 默认 metric=fusion；fusion 基于 Test11/Test22 模式调参，融合普通 Pearson、平滑导数相关、平滑 Pearson 和少量形态特征相关。
 - score 越高表示波形越相像；rmse_z、mae_abs、rmse_abs 越低表示误差越小。
 
 常用参数：
@@ -226,7 +226,7 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" --top 1 --p
 - --min-start-separation-s：输出结果之间的最小起始时间间隔；用于避免 top 5 全部挤在同一段。
 - --independent：使用 short-dir 时不做有序非重叠全局匹配，而是每个短 CSV 独立输出 top 匹配。
 - --ordered-gap-s：有序非重叠匹配时，区间之间额外要求的间隔。
-- --sample-method：nearest 或 linear；默认 nearest。
+- --sample-method：nearest 或 linear；默认 linear。
 - --resample-points：每个候选窗口重采样为多少点后评分；默认 3000。
 - --smooth-window-points：平滑指标使用的移动平均窗口点数；默认 15。
 - --start-step-rows：每隔多少个长 CSV 点滑动一次；默认 1。

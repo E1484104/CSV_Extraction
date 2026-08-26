@@ -1225,14 +1225,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--metric",
         choices=["all", *METRICS],
-        default="pearson",
-        help="Scoring metric. Use all to compare every supported metric. Default: pearson.",
+        default="fusion",
+        help="Scoring metric. Use all to compare every supported metric. Default: fusion.",
     )
     parser.add_argument(
         "--sample-method",
         choices=["nearest", "linear"],
-        default="nearest",
-        help="How to sample long CSV at shifted short time points. Default: nearest.",
+        default="linear",
+        help="How to sample long CSV at shifted short time points. Default: linear.",
     )
     parser.add_argument(
         "--resample-points",
