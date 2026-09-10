@@ -7,14 +7,21 @@ from pathlib import Path
 
 from matplotlib import pyplot as plt
 from matplotlib.patches import ConnectionPatch, Rectangle
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 
 PLOT_FIGSIZE = (10, 6)
 PLOT_DPI = 100
 MATCH_DETAIL_PANE_LIMIT = 4
-LONG_OVERLAY_ALPHA = 0.88
-SHORT_OVERLAY_ALPHA = 0.55
+LONG_OVERLAY_ALPHA = 0.68
+SHORT_OVERLAY_ALPHA = 0.78
+OMIT_AFTER_PHASE1_S = 2.0
+OMITTED_DISPLAY_GAP_MIN_S = 5.0
+OMITTED_DISPLAY_GAP_RATIO = 0.12
+OMITTED_MARKER_SEPARATION_RATIO = 0.10
+PHASE_LABELS = ("Baseline", "Reperfusion", "Post-perfusion")
+ULTRASOUND_AXIS_COLOR = "#6A4C93"
+NORMALIZED_ULTRASOUND_LABEL = "Normalized Ultrasound Data"
 
 
 @dataclass(frozen=True)
@@ -27,6 +34,8 @@ class MatchOverlaySeries:
     end_time: float
     rank: int
     score: float
+    pearson: float = math.nan
+    pearson_p: float = math.nan
     matched_long_times: Sequence[float] | None = None
     matched_long_values: Sequence[float] | None = None
 
@@ -65,6 +74,20 @@ class PairedWindowZoomSeries:
     end_time: float
     duration_s: float
     point_count: int
+
+
+@dataclass(frozen=True)
+class OmittedTimeRange:
+    start_s: float
+    end_s: float
+
+    @property
+    def duration_s(self) -> float:
+        return self.end_s - self.start_s
+
+    @property
+    def display_gap_s(self) -> float:
+        return max(OMITTED_DISPLAY_GAP_MIN_S, self.duration_s * OMITTED_DISPLAY_GAP_RATIO)
 
 
 def _point_columns(rows: list[dict[str, float]]) -> tuple[str, str]:
@@ -140,6 +163,155 @@ def _finite_paired_window_points(
     return finite_xs, finite_short_values, finite_long_values
 
 
+def _phase_gap_to_omit(
+    matches: Sequence[MatchOverlaySeries],
+) -> OmittedTimeRange | None:
+    matches_by_rank = {match.rank: match for match in matches}
+    phase1 = matches_by_rank.get(1)
+    phase2 = matches_by_rank.get(2)
+    if phase1 is None or phase2 is None:
+        return None
+
+    omit_start = float(phase1.end_time) + OMIT_AFTER_PHASE1_S
+    omit_end = float(phase2.start_time)
+    if omit_end <= omit_start:
+        return None
+    return OmittedTimeRange(start_s=omit_start, end_s=omit_end)
+
+
+def _is_visible_time(x_value: float, omitted: OmittedTimeRange | None) -> bool:
+    if omitted is None:
+        return True
+    return x_value <= omitted.start_s or x_value >= omitted.end_s
+
+
+def _display_time(x_value: float, omitted: OmittedTimeRange | None) -> float:
+    if omitted is None or x_value < omitted.end_s:
+        return x_value
+    return x_value - omitted.duration_s + omitted.display_gap_s
+
+
+def _source_time(display_value: float, omitted: OmittedTimeRange | None) -> float:
+    if omitted is None or display_value <= omitted.start_s:
+        return display_value
+    return display_value + omitted.duration_s - omitted.display_gap_s
+
+
+def _format_display_tick(display_value: float, omitted: OmittedTimeRange | None) -> str:
+    if omitted is not None:
+        gap_end = omitted.start_s + omitted.display_gap_s
+        if omitted.start_s < display_value < gap_end:
+            return ""
+    return f"{_source_time(display_value, omitted):.6g}"
+
+
+def _display_time_chunks(
+    xs: Sequence[float],
+    ys: Sequence[float],
+    omitted: OmittedTimeRange | None,
+) -> list[tuple[list[float], list[float]]]:
+    chunks: list[tuple[list[float], list[float]]] = []
+    chunk_xs: list[float] = []
+    chunk_ys: list[float] = []
+    for x, y in zip(xs, ys):
+        x_value = float(x)
+        y_value = float(y)
+        if not math.isfinite(x_value) or not math.isfinite(y_value):
+            if chunk_xs:
+                chunks.append((chunk_xs, chunk_ys))
+                chunk_xs = []
+                chunk_ys = []
+            continue
+        if not _is_visible_time(x_value, omitted):
+            if chunk_xs:
+                chunks.append((chunk_xs, chunk_ys))
+                chunk_xs = []
+                chunk_ys = []
+            continue
+        chunk_xs.append(_display_time(x_value, omitted))
+        chunk_ys.append(y_value)
+    if chunk_xs:
+        chunks.append((chunk_xs, chunk_ys))
+    return chunks
+
+
+def _display_time_bounds(
+    xs: Sequence[float],
+    omitted: OmittedTimeRange | None,
+) -> tuple[float, float]:
+    display_xs = [
+        _display_time(float(x), omitted)
+        for x in xs
+        if math.isfinite(float(x)) and _is_visible_time(float(x), omitted)
+    ]
+    return _expanded_bounds(display_xs)
+
+
+def _visible_y_bounds(
+    xs: Sequence[float],
+    ys: Sequence[float],
+    omitted: OmittedTimeRange | None,
+) -> tuple[float, float]:
+    values = [
+        float(y)
+        for x, y in zip(xs, ys)
+        if (
+            math.isfinite(float(x))
+            and math.isfinite(float(y))
+            and _is_visible_time(float(x), omitted)
+        )
+    ]
+    return _expanded_bounds(values)
+
+
+def _configure_time_axis(
+    axis,
+    omitted: OmittedTimeRange | None,
+    *,
+    nbins: int,
+    labelsize: int,
+) -> None:
+    axis.xaxis.set_major_locator(MaxNLocator(nbins=nbins))
+    if omitted is not None:
+        axis.xaxis.set_major_formatter(
+            FuncFormatter(lambda value, _position: _format_display_tick(value, omitted))
+        )
+    axis.tick_params(axis="x", colors="#2e343c", labelsize=labelsize)
+
+
+def _draw_x_axis_break(axis, omitted: OmittedTimeRange | None) -> None:
+    if omitted is None:
+        return
+    x_min, x_max = axis.get_xlim()
+    if x_max <= x_min:
+        return
+    marker_separation = omitted.display_gap_s * OMITTED_MARKER_SEPARATION_RATIO
+    marker_center = omitted.start_s + omitted.display_gap_s / 2.0
+    break_values = (
+        marker_center - marker_separation / 2.0,
+        marker_center + marker_separation / 2.0,
+    )
+    break_fractions = tuple(
+        (value - x_min) / (x_max - x_min) for value in break_values
+    )
+    if any(value <= 0.0 or value >= 1.0 for value in break_fractions):
+        return
+
+    # Draw two full-height zig-zag boundaries. The gap between them is
+    # intentionally empty, so omitted data cannot be mistaken for a signal.
+    zigzag_y = (0.0, 0.16, 0.32, 0.48, 0.64, 0.80, 1.0)
+    zigzag_x = (-0.010, 0.004, -0.010, 0.004, -0.010, 0.004, -0.010)
+    for break_fraction in break_fractions:
+        axis.plot(
+            [break_fraction + value for value in zigzag_x],
+            zigzag_y,
+            transform=axis.transAxes,
+            color="#38404a",
+            linewidth=1.15,
+            clip_on=False,
+        )
+
+
 def _format_plot_p_value(value: float) -> str:
     if not math.isfinite(value):
         return "NA"
@@ -150,6 +322,12 @@ def _format_plot_number(value: float) -> str:
     if not math.isfinite(value):
         return "NA"
     return f"{value:.6g}"
+
+
+def _phase_label(index: int) -> str:
+    if 0 <= index < len(PHASE_LABELS):
+        return PHASE_LABELS[index]
+    return f"phase {index + 1}"
 
 
 def _windowed_y_bounds(
@@ -253,8 +431,9 @@ def write_dual_axis_match_overlay_plot(
     if not prepared_matches:
         raise RuntimeError("No finite matched short CSV points are available for plotting")
 
-    x_min, x_max = _expanded_bounds(long_xs)
-    long_y_min, long_y_max = _expanded_bounds(long_ys)
+    omitted = _phase_gap_to_omit([match for match, *_ in prepared_matches])
+    x_min, x_max = _display_time_bounds(long_xs, omitted)
+    long_y_min, long_y_max = _visible_y_bounds(long_xs, long_ys, omitted)
     short_values_all = [
         value
         for _, _, short_ys, _, _ in prepared_matches
@@ -262,28 +441,22 @@ def write_dual_axis_match_overlay_plot(
     ]
     short_y_min, short_y_max = _expanded_bounds(short_values_all)
 
-    long_color = "#1f5f9e"
+    long_color = "#111111"
     short_colors = [
-        "#c2571a",
-        "#178a63",
-        "#7b4ab8",
-        "#b33c60",
-        "#8a6f12",
-        "#156f7a",
+        "#ff3b30",
+        "#00a878",
+        "#2F80ED",
+        "#f0005a",
+        "#f59e0b",
+        "#00a6d6",
     ]
-    short_y_labels = sorted({match.y_label for match, _, _, _, _ in prepared_matches})
-    if len(short_y_labels) == 1:
-        short_y_label = f"Normalized Ultrasound Data"
-    else:
-        short_y_label = "short signal"
+    short_y_label = NORMALIZED_ULTRASOUND_LABEL
 
-    detail_matches = prepared_matches[:MATCH_DETAIL_PANE_LIMIT]
-    detail_count = max(1, len(detail_matches))
-
-    figure = plt.figure(figsize=(12, 8), dpi=PLOT_DPI)
+    pane_count = len(prepared_matches)
+    figure = plt.figure(figsize=(max(12.0, 4.0 * pane_count), 8), dpi=PLOT_DPI)
     grid = figure.add_gridspec(
         2,
-        detail_count,
+        pane_count,
         height_ratios=[2.25, 1.0],
         hspace=0.38,
         wspace=0.34,
@@ -297,17 +470,22 @@ def write_dual_axis_match_overlay_plot(
 
         short_axis = axis.twinx()
         short_axis.patch.set_alpha(0.0)
-        long_line = axis.plot(
-            long_xs,
-            long_ys,
-            color=long_color,
-            linewidth=1.5,
-            alpha=LONG_OVERLAY_ALPHA,
-            label=f"Wearable Data",
-            zorder=2,
-        )
+        long_line = []
+        for chunk_xs, chunk_ys in _display_time_chunks(long_xs, long_ys, omitted):
+            long_line.extend(
+                axis.plot(
+                    chunk_xs,
+                    chunk_ys,
+                    color=long_color,
+                    linewidth=1.5,
+                    alpha=LONG_OVERLAY_ALPHA,
+                    label="Wearable Data" if not long_line else "",
+                    zorder=2,
+                )
+            )
 
         short_lines = []
+        legend_short_lines = []
         for index, (
             match,
             short_xs,
@@ -316,44 +494,44 @@ def write_dual_axis_match_overlay_plot(
             matched_long_ys,
         ) in enumerate(prepared_matches):
             color = short_colors[index % len(short_colors)]
-            axis.axvspan(match.start_time, match.end_time, color=color, alpha=0.07, linewidth=0)
-            if matched_long_xs:
-                axis.plot(
-                    matched_long_xs,
-                    matched_long_ys,
-                    color=long_color,
-                    linewidth=1.9,
-                    alpha=0.48,
+            axis.axvspan(
+                _display_time(match.start_time, omitted),
+                _display_time(match.end_time, omitted),
+                color=color,
+                alpha=0.07,
+                linewidth=0,
+            )
+            for chunk_xs, chunk_ys in _display_time_chunks(short_xs, short_ys, omitted):
+                lines = short_axis.plot(
+                    chunk_xs,
+                    chunk_ys,
+                    color=color,
+                    linewidth=1.8,
+                    alpha=SHORT_OVERLAY_ALPHA,
+                    label=(
+                        f"Ultrasound {_phase_label(index)}"
+                    ),
                     zorder=3,
                 )
-            lines = short_axis.plot(
-                short_xs,
-                short_ys,
-                color=color,
-                linewidth=1.8,
-                alpha=SHORT_OVERLAY_ALPHA,
-                label=(
-                    f"Ultrasound Data | phase {match.rank} | "
-                    f"{match.start_time:.6g}-{match.end_time:.6g} | {match.score:.4g}"
-                ),
-                zorder=3,
-            )
-            short_lines.extend(lines)
+                short_lines.extend(lines)
+                if len(legend_short_lines) <= index:
+                    legend_short_lines.append(lines[0])
 
-        title = f"Matched Sample Interval | metric={metric}"
-        if plot_mode != "raw":
-            title += f" | plot={plot_mode}"
-        axis.set_title(title, fontsize=14, pad=14)
+        axis.set_title("Temporal Alignment and Waveform Comparison", fontsize=14, pad=14)
         axis.set_xlabel(f"Sample Time (s)")
-        axis.set_ylabel(f"Normalized Wearable Data", color=long_color)
-        short_axis.set_ylabel(short_y_label)
+        axis.set_ylabel("Wearable Data", color=long_color)
+        short_axis.set_ylabel(short_y_label, color=ULTRASOUND_AXIS_COLOR)
         axis.set_xlim(x_min, x_max)
         axis.set_ylim(long_y_min, long_y_max)
         short_axis.set_ylim(short_y_min, short_y_max)
 
-        lines = [*long_line, *short_lines]
-        labels = [line.get_label() for line in lines]
-        axis.legend(lines, labels, loc="best", frameon=False, fontsize=8)
+        axis.legend(
+            [long_line[0], *legend_short_lines],
+            ["Wearable Data", *[f"Ultrasound {_phase_label(index)}" for index in range(len(legend_short_lines))]],
+            loc="best",
+            frameon=False,
+            fontsize=8,
+        )
 
         axis.xaxis.set_major_locator(MaxNLocator(nbins=10))
         axis.yaxis.set_major_locator(MaxNLocator(nbins=6))
@@ -365,10 +543,12 @@ def write_dual_axis_match_overlay_plot(
         axis.spines["left"].set_color(long_color)
         axis.spines["bottom"].set_color("#38404a")
         short_axis.spines["top"].set_visible(False)
-        short_axis.spines["right"].set_color("#38404a")
+        short_axis.spines["right"].set_color(ULTRASOUND_AXIS_COLOR)
         axis.tick_params(axis="x", colors="#2e343c", labelsize=9)
         axis.tick_params(axis="y", colors=long_color, labelsize=9)
-        short_axis.tick_params(axis="y", colors="#2e343c", labelsize=9)
+        short_axis.tick_params(axis="y", colors=ULTRASOUND_AXIS_COLOR, labelsize=9)
+        _configure_time_axis(axis, omitted, nbins=10, labelsize=9)
+        _draw_x_axis_break(axis, omitted)
 
         for index, (
             match,
@@ -376,7 +556,7 @@ def write_dual_axis_match_overlay_plot(
             short_ys,
             matched_long_xs,
             matched_long_ys,
-        ) in enumerate(detail_matches):
+        ) in enumerate(prepared_matches):
             detail_axis = figure.add_subplot(grid[1, index])
             detail_short_axis = detail_axis.twinx()
             detail_short_axis.patch.set_alpha(0.0)
@@ -423,22 +603,31 @@ def write_dual_axis_match_overlay_plot(
                 zorder=3,
             )
             detail_axis.set_title(
-                f"phase {match.rank} | {match.start_time:.6g}-{match.end_time:.6g}",
+                "\n".join(
+                    [
+                        _phase_label(index),
+                        f"start-end = {match.start_time:.6g}-{match.end_time:.6g} s",
+                        (
+                            f"correlation = {match.pearson:.4g} | "
+                            f"p-value = {_format_plot_p_value(match.pearson_p)}"
+                        ),
+                    ]
+                ),
                 fontsize=9,
                 pad=8,
             )
             detail_axis.set_xlim(detail_x_min, detail_x_max)
             detail_axis.set_ylim(detail_long_y_min, detail_long_y_max)
             detail_short_axis.set_ylim(detail_short_y_min, detail_short_y_max)
-            detail_axis.set_xlabel(f"Sample Time (s)", fontsize=8)
+            detail_axis.set_xlabel("Sample Time (s)", fontsize=8)
             if index == 0:
-                detail_axis.set_ylabel(f"Normalized Wearable Data", color=long_color, fontsize=8)
-            else:
-                detail_axis.tick_params(axis="y", labelleft=False)
-            if index == len(detail_matches) - 1:
-                detail_short_axis.set_ylabel(short_y_label, fontsize=8)
-            else:
-                detail_short_axis.tick_params(axis="y", labelright=False)
+                detail_axis.set_ylabel("Wearable Data", color=long_color, fontsize=8)
+            if index == pane_count - 1:
+                detail_short_axis.set_ylabel(
+                    NORMALIZED_ULTRASOUND_LABEL,
+                    color=ULTRASOUND_AXIS_COLOR,
+                    fontsize=8,
+                )
 
             detail_axis.xaxis.set_major_locator(MaxNLocator(nbins=4))
             detail_axis.yaxis.set_major_locator(MaxNLocator(nbins=4))
@@ -450,10 +639,10 @@ def write_dual_axis_match_overlay_plot(
             detail_axis.spines["left"].set_color(long_color)
             detail_axis.spines["bottom"].set_color("#38404a")
             detail_short_axis.spines["top"].set_visible(False)
-            detail_short_axis.spines["right"].set_color("#38404a")
+            detail_short_axis.spines["right"].set_color(color)
             detail_axis.tick_params(axis="x", colors="#2e343c", labelsize=8)
             detail_axis.tick_params(axis="y", colors=long_color, labelsize=8)
-            detail_short_axis.tick_params(axis="y", colors="#2e343c", labelsize=8)
+            detail_short_axis.tick_params(axis="y", colors=color, labelsize=8)
 
         figure.subplots_adjust(
             left=0.07,
@@ -507,14 +696,14 @@ def write_paired_match_points_plot(
     if not prepared:
         raise RuntimeError("No finite paired match points are available for plotting")
 
-    long_color = "#1f5f9e"
+    long_color = "#111111"
     short_colors = [
-        "#c2571a",
-        "#178a63",
-        "#7b4ab8",
-        "#b33c60",
-        "#8a6f12",
-        "#156f7a",
+        "#ff3b30",
+        "#00a878",
+        "#2F80ED",
+        "#f0005a",
+        "#f59e0b",
+        "#00a6d6",
     ]
     pane_count = len(prepared)
     figure_width = max(10.0, 3.8 * pane_count)
@@ -570,7 +759,7 @@ def write_paired_match_points_plot(
             short_y_min, short_y_max = _expanded_bounds(short_ys)
 
             axis.set_title(
-                f"phase {match.rank} | {match.start_time:.6g}-{match.end_time:.6g}",
+                f"{_phase_label(index)} | {match.start_time:.6g}-{match.end_time:.6g}",
                 fontsize=10,
                 pad=8,
             )
@@ -583,7 +772,7 @@ def write_paired_match_points_plot(
             else:
                 axis.tick_params(axis="y", labelleft=False)
             if index == pane_count - 1:
-                short_axis.set_ylabel("Ultrasound paired value", fontsize=9)
+                short_axis.set_ylabel(window.short_label, color=ULTRASOUND_AXIS_COLOR, fontsize=9)
             else:
                 short_axis.tick_params(axis="y", labelright=False)
 
@@ -597,7 +786,7 @@ def write_paired_match_points_plot(
             axis.spines["left"].set_color(long_color)
             axis.spines["bottom"].set_color("#38404a")
             short_axis.spines["top"].set_visible(False)
-            short_axis.spines["right"].set_color("#38404a")
+            short_axis.spines["right"].set_color(ULTRASOUND_AXIS_COLOR)
             axis.tick_params(axis="x", colors="#2e343c", labelsize=8)
             axis.tick_params(axis="y", colors=long_color, labelsize=8)
             short_axis.tick_params(axis="y", colors="#2e343c", labelsize=8)
@@ -679,14 +868,14 @@ def write_paired_window_overlay_zoom_plot(
     if not prepared:
         raise RuntimeError("No finite paired window points are available for plotting")
 
-    long_color = "#1f5f9e"
+    long_color = "#111111"
     short_colors = [
-        "#c2571a",
-        "#178a63",
-        "#7b4ab8",
-        "#b33c60",
-        "#8a6f12",
-        "#156f7a",
+        "#ff3b30",
+        "#00a878",
+        "#2F80ED",
+        "#f0005a",
+        "#f59e0b",
+        "#00a6d6",
     ]
     pane_count = len(prepared)
     figure_width = max(11.0, 3.9 * pane_count)
@@ -743,7 +932,7 @@ def write_paired_window_overlay_zoom_plot(
                 color=color,
                 linewidth=1.8,
                 alpha=SHORT_OVERLAY_ALPHA,
-                label=f"phase{index + 1}",
+                label=f"Ultrasound {_phase_label(index)}",
                 zorder=3,
             )
             overlay_axis.axvspan(
@@ -755,33 +944,18 @@ def write_paired_window_overlay_zoom_plot(
                 zorder=1,
             )
 
-        duration_s = prepared[0][0].duration_s
-        point_counts = sorted({window.point_count for window, _, _, _, _, _ in prepared})
-        point_text = (
-            f"{point_counts[0]} pts"
-            if len(point_counts) == 1
-            else f"{point_counts[0]}-{point_counts[-1]} pts"
-        )
-        title = (
-            "Rank-1 Selected Window on Matched Overlay | "
-            f"size={_format_plot_number(duration_s)} s ({point_text})"
-        )
-        if metric:
-            title += f" | metric={metric}"
         overlay_axis.set_title(
-            title,
+            "Temporal Alignment and Waveform Comparison",
             fontsize=14,
             pad=14,
         )
-        overlay_axis.set_ylabel(
-            overlay_long_label,
-            color=long_color,
-        )
+        overlay_axis.set_ylabel("Wearable Data", color=long_color)
         overlay_short_axis.set_ylabel(
             _common_axis_label(
                 [window.short_label for window, _, _, _, _, _ in prepared],
-                "Ultrasound paired value",
-            )
+                NORMALIZED_ULTRASOUND_LABEL,
+            ),
+            color=ULTRASOUND_AXIS_COLOR,
         )
         overlay_axis.set_xlim(x_min, x_max)
         overlay_axis.set_ylim(long_y_min, long_y_max)
@@ -797,10 +971,10 @@ def write_paired_window_overlay_zoom_plot(
         overlay_axis.spines["left"].set_color(long_color)
         overlay_axis.spines["bottom"].set_color("#38404a")
         overlay_short_axis.spines["top"].set_visible(False)
-        overlay_short_axis.spines["right"].set_color("#38404a")
+        overlay_short_axis.spines["right"].set_color(ULTRASOUND_AXIS_COLOR)
         overlay_axis.tick_params(axis="x", colors="#2e343c", labelsize=9)
         overlay_axis.tick_params(axis="y", colors=long_color, labelsize=9)
-        overlay_short_axis.tick_params(axis="y", colors="#2e343c", labelsize=9)
+        overlay_short_axis.tick_params(axis="y", colors=ULTRASOUND_AXIS_COLOR, labelsize=9)
 
         legend_lines = list(long_line)
         legend_labels = [line.get_label() for line in legend_lines]
@@ -860,7 +1034,7 @@ def write_paired_window_overlay_zoom_plot(
             detail_axis.set_title(
                 "\n".join(
                     [
-                        f"phase{index + 1}",
+                        _phase_label(index),
                         (
                             f"Pearson r = {_format_plot_number(window.pearson)} | "
                             f"p-value = {_format_plot_p_value(window.pearson_p)}"
@@ -876,13 +1050,13 @@ def write_paired_window_overlay_zoom_plot(
             )
             detail_axis.set_xlabel("Sample Time (s)", fontsize=9)
             if index == 0:
-                detail_axis.set_ylabel(window.long_label, color=long_color, fontsize=9)
-            else:
-                detail_axis.tick_params(axis="y", labelleft=False)
+                detail_axis.set_ylabel("Wearable Data", color=long_color, fontsize=9)
             if index == pane_count - 1:
-                detail_short_axis.set_ylabel(window.short_label, fontsize=9)
-            else:
-                detail_short_axis.tick_params(axis="y", labelright=False)
+                detail_short_axis.set_ylabel(
+                    NORMALIZED_ULTRASOUND_LABEL,
+                    color=ULTRASOUND_AXIS_COLOR,
+                    fontsize=9,
+                )
 
             detail_axis.xaxis.set_major_locator(MaxNLocator(nbins=5))
             detail_axis.yaxis.set_major_locator(MaxNLocator(nbins=5))
@@ -894,10 +1068,10 @@ def write_paired_window_overlay_zoom_plot(
             detail_axis.spines["left"].set_color(long_color)
             detail_axis.spines["bottom"].set_color("#38404a")
             detail_short_axis.spines["top"].set_visible(False)
-            detail_short_axis.spines["right"].set_color("#38404a")
+            detail_short_axis.spines["right"].set_color(color)
             detail_axis.tick_params(axis="x", colors="#2e343c", labelsize=8)
             detail_axis.tick_params(axis="y", colors=long_color, labelsize=8)
-            detail_short_axis.tick_params(axis="y", colors="#2e343c", labelsize=8)
+            detail_short_axis.tick_params(axis="y", colors=color, labelsize=8)
 
             overlay_axis.add_patch(
                 Rectangle(
@@ -969,14 +1143,14 @@ def write_paired_window_rank_plot(
     if not prepared:
         raise RuntimeError("No finite paired window points are available for plotting")
 
-    long_color = "#1f5f9e"
+    long_color = "#111111"
     short_colors = [
-        "#c2571a",
-        "#178a63",
-        "#7b4ab8",
-        "#b33c60",
-        "#8a6f12",
-        "#156f7a",
+        "#ff3b30",
+        "#00a878",
+        "#2F80ED",
+        "#f0005a",
+        "#f59e0b",
+        "#00a6d6",
     ]
     pane_count = len(prepared)
     figure_width = max(10.0, 3.8 * pane_count)
@@ -1038,7 +1212,7 @@ def write_paired_window_rank_plot(
             axis.set_title(
                 "\n".join(
                     [
-                        f"phase{index + 1}",
+                        _phase_label(index),
                         (
                             f"Pearson r = {_format_plot_number(window.pearson)} | "
                             f"p-value = {_format_plot_p_value(window.pearson_p)}"
@@ -1061,7 +1235,7 @@ def write_paired_window_rank_plot(
             else:
                 axis.tick_params(axis="y", labelleft=False)
             if index == pane_count - 1:
-                short_axis.set_ylabel(window.short_label, fontsize=9)
+                short_axis.set_ylabel(window.short_label, color=color, fontsize=9)
             else:
                 short_axis.tick_params(axis="y", labelright=False)
 
@@ -1138,8 +1312,8 @@ def write_dual_axis_match_plot(
     long_y_min, long_y_max = _expanded_bounds(long_ys)
     short_y_min, short_y_max = _expanded_bounds(short_ys)
 
-    long_color = "#1667be"
-    short_color = "#c2571a"
+    long_color = "#111111"
+    short_color = "#ff3b30"
 
     figure, axis = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
     try:
@@ -1174,7 +1348,7 @@ def write_dual_axis_match_plot(
         )
         axis.set_xlabel(f"long {long_x_label}")
         axis.set_ylabel(f"long {long_y_label}", color=long_color)
-        short_axis.set_ylabel(f"short {short_y_label}", color=short_color)
+        short_axis.set_ylabel(NORMALIZED_ULTRASOUND_LABEL, color=ULTRASOUND_AXIS_COLOR)
         axis.set_xlim(x_min, x_max)
         axis.set_ylim(long_y_min, long_y_max)
         short_axis.set_ylim(short_y_min, short_y_max)
@@ -1206,11 +1380,11 @@ def write_dual_axis_match_plot(
         axis.spines["left"].set_color(long_color)
         axis.spines["bottom"].set_color("#38404a")
         short_axis.spines["top"].set_visible(False)
-        short_axis.spines["right"].set_color(short_color)
+        short_axis.spines["right"].set_color(ULTRASOUND_AXIS_COLOR)
         top_axis.spines["top"].set_color("#38404a")
         axis.tick_params(axis="x", colors="#2e343c", labelsize=9)
         axis.tick_params(axis="y", colors=long_color, labelsize=9)
-        short_axis.tick_params(axis="y", colors=short_color, labelsize=9)
+        short_axis.tick_params(axis="y", colors=ULTRASOUND_AXIS_COLOR, labelsize=9)
         top_axis.tick_params(axis="x", colors="#2e343c", labelsize=9)
 
         figure.tight_layout()

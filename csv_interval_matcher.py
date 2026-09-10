@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from scipy.signal import find_peaks
 from scipy import stats
 
 from config import ROOT_PATH, bpi_processed_path, norm_data_path
@@ -116,6 +117,27 @@ class ScoredSeries:
     diagnostics_by_start: list[WindowDiagnostics]
     mean_gaps: np.ndarray
     max_gaps: np.ndarray
+
+
+@dataclass(frozen=True)
+class LongRiseAnchor:
+    score: float
+    valley_time: float
+    peak_time: float
+    rise_z: float
+    duration_s: float
+    valley_z: float
+    peak_z: float
+
+
+@dataclass(frozen=True)
+class Phase2RiseWindow:
+    start_s: float
+    end_s: float
+    target_start_s: float
+    anchor: LongRiseAnchor
+    long_peak_time: float | None
+    short_peak_offset_s: float
 
 
 def parse_float(value: str | None) -> float | None:
@@ -427,6 +449,38 @@ def linear_sample(
     return sampled_values, gaps
 
 
+def values_at_offsets(series: CsvSeries, offsets: np.ndarray) -> np.ndarray:
+    source_offsets = series.times - series.times[0]
+    return np.interp(offsets, source_offsets, series.values)
+
+
+def resample_to_uniform_offsets(
+    series: CsvSeries,
+    point_count: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if point_count < 3:
+        raise RuntimeError("--resample-points must be at least 3")
+
+    duration = float(series.times[-1] - series.times[0])
+    offsets = np.linspace(0.0, duration, point_count)
+    return offsets, values_at_offsets(series, offsets)
+
+
+def sample_series_at_times(
+    series: CsvSeries,
+    target_times: np.ndarray,
+    sample_method: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    if sample_method == "linear":
+        return linear_sample(series.times, series.values, target_times)
+    return nearest_sample(series.times, series.values, target_times)
+
+
+def nan_diagnostics() -> WindowDiagnostics:
+    field_count = len(WindowDiagnostics.__dataclass_fields__)
+    return WindowDiagnostics(*([math.nan] * field_count))
+
+
 def candidate_start_times(
     long_times: np.ndarray,
     short_duration: float,
@@ -449,6 +503,312 @@ def candidate_start_times(
         raise RuntimeError("--start-step-rows must be greater than 0")
     valid = long_times[long_times <= latest_start + EPSILON]
     return valid[::start_step_rows]
+
+
+def smoothing_points_for_seconds(times: np.ndarray, window_s: float) -> int:
+    if window_s <= 0 or len(times) < 2:
+        return 1
+    deltas = np.diff(times)
+    deltas = deltas[deltas > EPSILON]
+    if len(deltas) == 0:
+        return 1
+    points = max(1, int(round(window_s / float(np.median(deltas)))))
+    if points % 2 == 0:
+        points += 1
+    return points
+
+
+def long_rise_anchors(
+    long: CsvSeries,
+    *,
+    min_after_s: float,
+    max_before_s: float | None,
+    smooth_s: float,
+    min_peak_distance_s: float,
+    min_rise_duration_s: float,
+    max_rise_duration_s: float,
+    min_rise_z: float,
+    min_score: float,
+) -> list[LongRiseAnchor]:
+    if min_peak_distance_s <= 0:
+        raise RuntimeError("--phase2-rise-min-peak-distance-s must be greater than 0")
+    if min_rise_duration_s <= 0:
+        raise RuntimeError("--phase2-rise-min-duration-s must be greater than 0")
+    if max_rise_duration_s <= 0:
+        raise RuntimeError("--phase2-rise-max-duration-s must be greater than 0")
+    if max_rise_duration_s < min_rise_duration_s:
+        raise RuntimeError(
+            "--phase2-rise-max-duration-s cannot be smaller than "
+            "--phase2-rise-min-duration-s"
+        )
+    if min_rise_z < 0:
+        raise RuntimeError("--phase2-rise-min-rise-z cannot be negative")
+
+    smooth_window_points = smoothing_points_for_seconds(long.times, smooth_s)
+    smoothed_values = smooth(long.values, smooth_window_points)
+    z_values = zscore(smoothed_values)
+    if z_values is None:
+        return []
+
+    sample_deltas = np.diff(long.times)
+    sample_deltas = sample_deltas[sample_deltas > EPSILON]
+    if len(sample_deltas) == 0:
+        return []
+    sample_step_s = float(np.median(sample_deltas))
+    peak_distance_points = max(1, int(round(min_peak_distance_s / sample_step_s)))
+
+    peaks, _ = find_peaks(
+        z_values,
+        distance=peak_distance_points,
+        prominence=max(0.0, min_rise_z * 0.05),
+    )
+    valleys, _ = find_peaks(
+        -z_values,
+        distance=peak_distance_points,
+        prominence=max(0.0, min_rise_z * 0.05),
+    )
+    if len(peaks) == 0 or len(valleys) == 0:
+        return []
+
+    anchors: list[LongRiseAnchor] = []
+    for valley_index in valleys:
+        valley_time = float(long.times[valley_index])
+        if valley_time + EPSILON < min_after_s:
+            continue
+        if max_before_s is not None and valley_time > max_before_s + EPSILON:
+            continue
+
+        following_peaks = peaks[peaks > valley_index]
+        if len(following_peaks) == 0:
+            continue
+
+        peak_times = long.times[following_peaks]
+        durations = peak_times - valley_time
+        valid = (
+            (durations >= min_rise_duration_s - EPSILON)
+            & (durations <= max_rise_duration_s + EPSILON)
+        )
+        if not np.any(valid):
+            continue
+
+        peak_index = int(following_peaks[np.flatnonzero(valid)[0]])
+        peak_time = float(long.times[peak_index])
+        duration_s = peak_time - valley_time
+        valley_z = float(z_values[valley_index])
+        peak_z = float(z_values[peak_index])
+        rise_z = peak_z - valley_z
+        if rise_z < min_rise_z:
+            continue
+
+        speed_adjusted_rise = rise_z / max(1.0, duration_s / 6.0)
+        low_valley_bonus = max(0.0, -valley_z) * 0.25
+        score = speed_adjusted_rise + low_valley_bonus
+        if score < min_score:
+            continue
+
+        anchors.append(
+            LongRiseAnchor(
+                score=float(score),
+                valley_time=valley_time,
+                peak_time=peak_time,
+                rise_z=float(rise_z),
+                duration_s=float(duration_s),
+                valley_z=valley_z,
+                peak_z=peak_z,
+            )
+        )
+
+    anchors.sort(key=lambda anchor: anchor.score, reverse=True)
+    return anchors
+
+
+def raw_peak_time_for_anchor(
+    long: CsvSeries,
+    anchor: LongRiseAnchor,
+    *,
+    after_smoothed_peak_s: float,
+) -> float:
+    if after_smoothed_peak_s < 0:
+        raise RuntimeError("--phase2-rise-long-peak-after-s cannot be negative")
+
+    window_start = anchor.valley_time
+    window_end = anchor.peak_time + after_smoothed_peak_s
+    mask = (long.times >= window_start - EPSILON) & (long.times <= window_end + EPSILON)
+    if not np.any(mask):
+        return anchor.peak_time
+    indices = np.flatnonzero(mask)
+    peak_index = int(indices[np.argmax(long.values[indices])])
+    return float(long.times[peak_index])
+
+
+def leading_peak_offset(
+    series: CsvSeries,
+    *,
+    window_s: float,
+    height_ratio: float,
+    min_peak_distance_s: float,
+) -> float:
+    if window_s <= 0:
+        raise RuntimeError("--phase2-rise-short-peak-window-s must be greater than 0")
+    if not 0.0 <= height_ratio <= 1.0:
+        raise RuntimeError("--phase2-rise-short-peak-height-ratio must be between 0 and 1")
+    if min_peak_distance_s <= 0:
+        raise RuntimeError("--phase2-rise-short-peak-distance-s must be greater than 0")
+
+    offsets = series.times - series.times[0]
+    mask = offsets <= window_s + EPSILON
+    if not np.any(mask):
+        return 0.0
+
+    window_offsets = offsets[mask]
+    window_values = series.values[mask]
+    value_min = float(np.min(window_values))
+    value_max = float(np.max(window_values))
+    if value_max - value_min <= EPSILON:
+        return 0.0
+
+    deltas = np.diff(series.times)
+    deltas = deltas[deltas > EPSILON]
+    if len(deltas) == 0:
+        return float(window_offsets[int(np.argmax(window_values))])
+
+    sample_step_s = float(np.median(deltas))
+    distance_points = max(1, int(round(min_peak_distance_s / sample_step_s)))
+    peaks, _ = find_peaks(
+        window_values,
+        distance=distance_points,
+        prominence=max(0.0, (value_max - value_min) * 0.05),
+    )
+    threshold = value_min + height_ratio * (value_max - value_min)
+    for peak_index in peaks:
+        if float(window_values[peak_index]) >= threshold:
+            return float(window_offsets[peak_index])
+
+    return float(window_offsets[int(np.argmax(window_values))])
+
+
+def phase2_rise_start_windows(
+    scored_items: list[ScoredSeries],
+    long: CsvSeries,
+    args: argparse.Namespace,
+) -> list[Phase2RiseWindow]:
+    if args.phase2_rise_constraint == "off":
+        return []
+    if len(scored_items) != 3 or args.independent:
+        return []
+    if args.phase2_rise_window_before_s < 0:
+        raise RuntimeError("--phase2-rise-window-before-s cannot be negative")
+    if args.phase2_rise_window_after_s < 0:
+        raise RuntimeError("--phase2-rise-window-after-s cannot be negative")
+    if args.phase2_rise_max_candidates <= 0:
+        raise RuntimeError("--phase2-rise-max-candidates must be greater than 0")
+
+    first_duration_s = float(scored_items[0].grid_offsets[-1])
+    second_duration_s = float(scored_items[1].grid_offsets[-1])
+    third_duration_s = float(scored_items[2].grid_offsets[-1])
+    min_after_s = (
+        args.phase2_rise_min_after_s
+        if args.phase2_rise_min_after_s is not None
+        else (
+            float(long.times[0])
+            + first_duration_s
+            + max(args.ordered_gap_s, args.three_short_skip_after_first_s)
+        )
+    )
+    latest_second_start = float(long.times[-1] - second_duration_s)
+    max_before_s = min(
+        latest_second_start,
+        float(long.times[-1] - second_duration_s - third_duration_s + args.ordered_overlap_s),
+    )
+    if max_before_s + EPSILON < min_after_s:
+        max_before_s = latest_second_start
+
+    anchors = long_rise_anchors(
+        long,
+        min_after_s=min_after_s,
+        max_before_s=max_before_s,
+        smooth_s=args.phase2_rise_smooth_s,
+        min_peak_distance_s=args.phase2_rise_min_peak_distance_s,
+        min_rise_duration_s=args.phase2_rise_min_duration_s,
+        max_rise_duration_s=args.phase2_rise_max_duration_s,
+        min_rise_z=args.phase2_rise_min_rise_z,
+        min_score=args.phase2_rise_min_score,
+    )
+    if not anchors:
+        return []
+
+    short_peak_offset_s = 0.0
+    if args.phase2_rise_align_to == "leading_peak":
+        short_peak_offset_s = leading_peak_offset(
+            scored_items[1].short,
+            window_s=args.phase2_rise_short_peak_window_s,
+            height_ratio=args.phase2_rise_short_peak_height_ratio,
+            min_peak_distance_s=args.phase2_rise_short_peak_distance_s,
+        )
+
+    windows: list[Phase2RiseWindow] = []
+    for anchor in anchors[: args.phase2_rise_max_candidates]:
+        long_peak_time = None
+        target_start = anchor.valley_time
+        if args.phase2_rise_align_to == "leading_peak":
+            long_peak_time = raw_peak_time_for_anchor(
+                long,
+                anchor,
+                after_smoothed_peak_s=args.phase2_rise_long_peak_after_s,
+            )
+            target_start = long_peak_time - short_peak_offset_s
+
+        window_start = target_start - args.phase2_rise_window_before_s
+        window_end = target_start + args.phase2_rise_window_after_s
+        window_start = max(window_start, float(long.times[0]))
+        window_end = min(window_end, latest_second_start)
+        if window_end + EPSILON >= window_start:
+            windows.append(
+                Phase2RiseWindow(
+                    start_s=float(window_start),
+                    end_s=float(window_end),
+                    target_start_s=float(target_start),
+                    anchor=anchor,
+                    long_peak_time=long_peak_time,
+                    short_peak_offset_s=float(short_peak_offset_s),
+                )
+            )
+
+    return windows
+
+
+def filter_scored_series_by_start_windows(
+    scored: ScoredSeries,
+    windows: list[Phase2RiseWindow],
+) -> ScoredSeries:
+    if not windows:
+        return scored
+
+    mask = np.zeros(len(scored.starts), dtype=bool)
+    for window in windows:
+        mask |= (
+            (scored.starts >= window.start_s - EPSILON)
+            & (scored.starts <= window.end_s + EPSILON)
+        )
+    if not np.any(mask):
+        return scored
+
+    indices = np.flatnonzero(mask)
+    return ScoredSeries(
+        short=scored.short,
+        grid_offsets=scored.grid_offsets,
+        starts=scored.starts[indices],
+        scores_by_metric={
+            metric: scores[indices]
+            for metric, scores in scored.scores_by_metric.items()
+        },
+        diagnostics_by_start=[
+            scored.diagnostics_by_start[int(index)]
+            for index in indices
+        ],
+        mean_gaps=scored.mean_gaps[indices],
+        max_gaps=scored.max_gaps[indices],
+    )
 
 
 def diagnostics_for_window(
@@ -490,6 +850,12 @@ def diagnostics_for_window(
 
 def safe(value: float, fallback: float = 0.0) -> float:
     return value if math.isfinite(value) else fallback
+
+
+def format_optional_float(value: float | None, precision: int = 3) -> str:
+    if value is None:
+        return "NA"
+    return f"{value:.{precision}f}"
 
 
 def agreement_from_error(error: float) -> float:
@@ -549,12 +915,7 @@ def scored_series_for_short(
     long: CsvSeries,
     args: argparse.Namespace,
 ) -> ScoredSeries:
-    if args.resample_points < 3:
-        raise RuntimeError("--resample-points must be at least 3")
-
-    short_offsets = short.times - short.times[0]
-    grid_offsets = np.linspace(0.0, short_offsets[-1], args.resample_points)
-    short_values = np.interp(grid_offsets, short_offsets, short.values)
+    grid_offsets, short_values = resample_to_uniform_offsets(short, args.resample_points)
 
     starts = candidate_start_times(
         long.times,
@@ -572,13 +933,14 @@ def scored_series_for_short(
 
     for start_time in starts:
         target_times = float(start_time) + grid_offsets
-        if args.sample_method == "linear":
-            sampled_values, gaps = linear_sample(long.times, long.values, target_times)
-        else:
-            sampled_values, gaps = nearest_sample(long.times, long.values, target_times)
+        sampled_values, gaps = sample_series_at_times(
+            long,
+            target_times,
+            args.sample_method,
+        )
 
         if args.max_nearest_gap_s is not None and np.any(gaps > args.max_nearest_gap_s):
-            diagnostics = WindowDiagnostics(*(math.nan for _ in range(17)))
+            diagnostics = nan_diagnostics()
         else:
             diagnostics = diagnostics_for_window(
                 short_values,
@@ -922,13 +1284,9 @@ def paired_values_for_match(
     long: CsvSeries,
     args: argparse.Namespace,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    short_offsets = scored.short.times - scored.short.times[0]
     aligned_times = result.start_time + scored.grid_offsets
-    short_values = np.interp(scored.grid_offsets, short_offsets, scored.short.values)
-    if args.sample_method == "linear":
-        long_values, _ = linear_sample(long.times, long.values, aligned_times)
-    else:
-        long_values, _ = nearest_sample(long.times, long.values, aligned_times)
+    short_values = values_at_offsets(scored.short, scored.grid_offsets)
+    long_values, _ = sample_series_at_times(long, aligned_times, args.sample_method)
     return aligned_times, short_values, long_values
 
 
@@ -1077,7 +1435,6 @@ def write_match_plots(
     from plotting import (
         MatchOverlaySeries,
         write_dual_axis_match_overlay_plot,
-        write_paired_match_points_plot,
     )
 
     grouped_requests: dict[str, list[tuple[ScoredSeries, MatchResult]]] = {}
@@ -1093,11 +1450,6 @@ def write_match_plots(
             metric=metric,
             total_groups=total_groups,
         )
-        paired_plot_path = paired_points_plot_path(
-            args.plot_output,
-            metric=metric,
-            total_groups=total_groups,
-        )
         plot_mode = "smooth_r" if getattr(args, "plot_smooth_r", False) else "raw"
         plot_long_values = long.values
         if getattr(args, "plot_smooth_r", False):
@@ -1109,14 +1461,13 @@ def write_match_plots(
             plot_long_values = smooth(long.values, long_smooth_window)
 
         short_matches: list[MatchOverlaySeries] = []
-        paired_matches: list[MatchOverlaySeries] = []
         for scored, result in requests:
             aligned_times, raw_short_values, raw_matched_long_values = (
                 paired_values_for_match(scored, result, long, args)
             )
             short_values = raw_short_values
-            overlay_matched_long_times = None
-            overlay_matched_long_values = None
+            overlay_matched_long_times = aligned_times
+            overlay_matched_long_values = raw_matched_long_values
             if getattr(args, "plot_smooth_r", False):
                 short_values = smooth(short_values, args.smooth_window_points)
                 overlay_matched_long_times = aligned_times
@@ -1134,25 +1485,12 @@ def write_match_plots(
                     end_time=result.end_time,
                     rank=result.rank,
                     score=result.score,
+                    pearson=result.diagnostics.pearson,
+                    pearson_p=result.diagnostics.pearson_p,
                     matched_long_times=overlay_matched_long_times,
                     matched_long_values=overlay_matched_long_values,
                 )
             )
-            paired_matches.append(
-                MatchOverlaySeries(
-                    name=scored.short.path.name,
-                    aligned_times=aligned_times,
-                    values=raw_short_values,
-                    y_label=scored.short.y_column,
-                    start_time=result.start_time,
-                    end_time=result.end_time,
-                    rank=result.rank,
-                    score=result.score,
-                    matched_long_times=aligned_times,
-                    matched_long_values=raw_matched_long_values,
-                )
-            )
-
         write_dual_axis_match_overlay_plot(
             plot_path,
             long_times=long.times,
@@ -1167,15 +1505,6 @@ def write_match_plots(
         )
         if plot_path is not None:
             written_paths.append(plot_path)
-        write_paired_match_points_plot(
-            paired_plot_path,
-            matches=paired_matches,
-            metric=metric,
-            sample_method=args.sample_method,
-            show=show_plot,
-        )
-        if paired_plot_path is not None:
-            written_paths.append(paired_plot_path)
     return written_paths
 
 
@@ -1285,6 +1614,127 @@ def build_parser() -> argparse.ArgumentParser:
             "Use 0 to disable. Default: 30."
         ),
     )
+    parser.add_argument(
+        "--phase2-rise-constraint",
+        choices=["auto", "off"],
+        default="auto",
+        help=(
+            "For three-short ordered matching, auto-detect the strongest low-valley "
+            "to high-rise interval in the long CSV and restrict the second short "
+            "start near that rise. Use off to disable. Default: auto."
+        ),
+    )
+    parser.add_argument(
+        "--phase2-rise-align-to",
+        choices=["leading_peak", "valley"],
+        default="leading_peak",
+        help=(
+            "Anchor the phase-2 start window to the long rise peak minus the "
+            "second short's leading peak offset, or directly to the detected "
+            "long valley. Default: leading_peak."
+        ),
+    )
+    parser.add_argument(
+        "--phase2-rise-window-before-s",
+        type=float,
+        default=0.5,
+        help=(
+            "Seconds before the phase-2 start anchor allowed for the second "
+            "start. Default: 0.5."
+        ),
+    )
+    parser.add_argument(
+        "--phase2-rise-window-after-s",
+        type=float,
+        default=1.0,
+        help=(
+            "Seconds after the phase-2 start anchor allowed for the second "
+            "start. Default: 1."
+        ),
+    )
+    parser.add_argument(
+        "--phase2-rise-min-after-s",
+        type=float,
+        help=(
+            "Earliest long time searched for the phase-2 rise valley. Default: long "
+            "start plus first-short duration plus the phase-2 skip constraint."
+        ),
+    )
+    parser.add_argument(
+        "--phase2-rise-smooth-s",
+        type=float,
+        default=1.0,
+        help="Smoothing window, in seconds, for phase-2 rise detection. Default: 1.",
+    )
+    parser.add_argument(
+        "--phase2-rise-min-peak-distance-s",
+        type=float,
+        default=1.5,
+        help="Minimum peak/valley separation for phase-2 rise detection. Default: 1.5.",
+    )
+    parser.add_argument(
+        "--phase2-rise-min-duration-s",
+        type=float,
+        default=2.0,
+        help="Minimum valley-to-peak duration for phase-2 rise detection. Default: 2.",
+    )
+    parser.add_argument(
+        "--phase2-rise-max-duration-s",
+        type=float,
+        default=25.0,
+        help="Maximum valley-to-peak duration for phase-2 rise detection. Default: 25.",
+    )
+    parser.add_argument(
+        "--phase2-rise-long-peak-after-s",
+        type=float,
+        default=1.0,
+        help=(
+            "Extra seconds after the smoothed rise peak searched for the raw long "
+            "maximum used by leading_peak alignment. Default: 1."
+        ),
+    )
+    parser.add_argument(
+        "--phase2-rise-short-peak-window-s",
+        type=float,
+        default=6.0,
+        help=(
+            "Initial seconds of the second short searched for its leading high "
+            "peak offset. Default: 6."
+        ),
+    )
+    parser.add_argument(
+        "--phase2-rise-short-peak-height-ratio",
+        type=float,
+        default=0.8,
+        help=(
+            "Earliest short peak at or above this fraction of the initial value "
+            "range is used for leading_peak alignment. Default: 0.8."
+        ),
+    )
+    parser.add_argument(
+        "--phase2-rise-short-peak-distance-s",
+        type=float,
+        default=0.2,
+        help="Minimum short peak distance for leading_peak alignment. Default: 0.2.",
+    )
+    parser.add_argument(
+        "--phase2-rise-min-rise-z",
+        type=float,
+        default=1.0,
+        help="Minimum z-score rise from valley to following peak. Default: 1.",
+    )
+    parser.add_argument(
+        "--phase2-rise-min-score",
+        type=float,
+        default=2.0,
+        help="Minimum combined phase-2 rise anchor score before constraining. Default: 2.",
+    )
+    parser.add_argument(
+        "--phase2-rise-max-candidates",
+        type=int,
+        default=1,
+        help="Number of top phase-2 rise anchors whose start windows are allowed. Default: 1.",
+    )
     parser.add_argument("--max-nearest-gap-s", type=float, help="Reject windows with a larger nearest-time gap.")
     parser.add_argument("--output", type=Path, help="Optional CSV path for the match table.")
     parser.add_argument(
@@ -1326,6 +1776,16 @@ def main(argv: list[str] | None = None) -> int:
             scored_series_for_short(short, long, args)
             for short in short_items
         ]
+        phase2_rise_windows = phase2_rise_start_windows(
+            scored_items,
+            long,
+            args,
+        )
+        if phase2_rise_windows:
+            scored_items[1] = filter_scored_series_by_start_windows(
+                scored_items[1],
+                phase2_rise_windows,
+            )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -1337,6 +1797,30 @@ def main(argv: list[str] | None = None) -> int:
         f"sample={args.sample_method} | resample_points={args.resample_points} | "
         f"smooth_window_points={args.smooth_window_points}"
     )
+    if (
+        len(scored_items) == 3
+        and not args.independent
+        and args.phase2_rise_constraint == "auto"
+    ):
+        if phase2_rise_windows:
+            window_text = ", ".join(
+                f"{window.start_s:.3f}..{window.end_s:.3f}s"
+                for window in phase2_rise_windows
+            )
+            anchor_text = ", ".join(
+                (
+                    f"target_start={window.target_start_s:.3f}s "
+                    f"valley={window.anchor.valley_time:.3f}s "
+                    f"rise_peak={window.anchor.peak_time:.3f}s "
+                    f"long_peak={format_optional_float(window.long_peak_time)}s "
+                    f"short_peak_offset={window.short_peak_offset_s:.3f}s "
+                    f"score={window.anchor.score:.3f}"
+                )
+                for window in phase2_rise_windows
+            )
+            print(f"phase2_rise_constraint=auto | starts={window_text} | {anchor_text}")
+        else:
+            print("phase2_rise_constraint=auto | no strong rise anchor found")
 
     metrics = metrics_from_args(args)
     all_results: list[MatchResult] = []

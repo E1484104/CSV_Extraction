@@ -246,6 +246,17 @@ python csv_interval_matcher.py --root "../20260814/Test9" `
   --ordered-overlap-s 0
 ```
 
+For the same three-short ordered mode, the matcher also detects the strongest
+low-valley-to-rise anchor in the long CSV after the phase-1 region. By default it
+then aligns the second short CSV's leading high peak to the raw long-CSV peak inside
+that rise and searches only a narrow start window around that alignment. This keeps
+the phase-2 overlay peak-to-peak near the reperfusion jump while the final choice is
+still ranked by the selected metric (`fusion`, `pearson`, etc.). Use
+`--phase2-rise-constraint off` to return to unconstrained phase-2 starts, or use
+`--phase2-rise-align-to valley` with a wider
+`--phase2-rise-window-before-s`/`--phase2-rise-window-after-s` if you want the older
+valley-neighborhood behavior.
+
 If `ROOT/BPI_Processed` contains more than one CSV, pass `--long` directly or narrow the
 folder scan with `--long-dir` and `--long-pattern`.
 
@@ -406,7 +417,7 @@ Each output CSV preserves the original columns and adds:
 x_norm,y_norm
 ```
 
-By default, each file's `x_px` range is mapped to `x_norm=0..29.8`. The y values are
+By default, each file's `x_px` range is mapped to `x_norm=0..29.68`. The y values are
 normalized together across all files.
 `y_norm` is inverted so image pixel coordinates become normal plot coordinates, with
 larger values higher on the graph.
@@ -418,7 +429,7 @@ python ultrasound_normalizer.py --input "csv" --output "csv_normalized" `
   --x-column x_px --y-column y_px
 
 python ultrasound_normalizer.py --input "csv" --output "csv_normalized" `
-  --duration-s 29.8
+  --duration-s 29.68
 
 python ultrasound_normalizer.py --input "csv" --output "csv_normalized" `
   --recursive

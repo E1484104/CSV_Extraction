@@ -333,6 +333,15 @@ def prefix_sums(values: np.ndarray) -> np.ndarray:
     return np.concatenate(([0.0], np.cumsum(values, dtype=float)))
 
 
+def range_sums(
+    values: np.ndarray,
+    start_indices: np.ndarray,
+    end_indices: np.ndarray,
+) -> np.ndarray:
+    sums = prefix_sums(values)
+    return sums[end_indices] - sums[start_indices]
+
+
 def pearsons_for_ranges(
     left_values: np.ndarray,
     right_values: np.ndarray,
@@ -342,32 +351,26 @@ def pearsons_for_ranges(
     min_points: int,
 ) -> np.ndarray:
     lengths = (end_indices - start_indices).astype(float)
-    left_prefix = prefix_sums(left_values)
-    right_prefix = prefix_sums(right_values)
-    left_sq_prefix = prefix_sums(left_values * left_values)
-    right_sq_prefix = prefix_sums(right_values * right_values)
-    cross_prefix = prefix_sums(left_values * right_values)
-
-    left_sum = left_prefix[end_indices] - left_prefix[start_indices]
-    right_sum = right_prefix[end_indices] - right_prefix[start_indices]
-    left_sq_sum = left_sq_prefix[end_indices] - left_sq_prefix[start_indices]
-    right_sq_sum = right_sq_prefix[end_indices] - right_sq_prefix[start_indices]
-    cross_sum = cross_prefix[end_indices] - cross_prefix[start_indices]
+    left_sum = range_sums(left_values, start_indices, end_indices)
+    right_sum = range_sums(right_values, start_indices, end_indices)
+    left_sq_sum = range_sums(left_values * left_values, start_indices, end_indices)
+    right_sq_sum = range_sums(right_values * right_values, start_indices, end_indices)
+    cross_sum = range_sums(left_values * right_values, start_indices, end_indices)
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        numerator = cross_sum - (left_sum * right_sum / lengths)
-        left_var = left_sq_sum - (left_sum * left_sum / lengths)
-        right_var = right_sq_sum - (right_sum * right_sum / lengths)
-        denominator = np.sqrt(left_var * right_var)
+        covariance_sum = cross_sum - (left_sum * right_sum / lengths)
+        left_variance_sum = left_sq_sum - (left_sum * left_sum / lengths)
+        right_variance_sum = right_sq_sum - (right_sum * right_sum / lengths)
+        denominator = np.sqrt(left_variance_sum * right_variance_sum)
 
     scores = np.full(len(start_indices), np.nan, dtype=float)
     valid = (
         (lengths >= min_points)
-        & (left_var > EPSILON)
-        & (right_var > EPSILON)
+        & (left_variance_sum > EPSILON)
+        & (right_variance_sum > EPSILON)
         & (denominator > EPSILON)
     )
-    scores[valid] = numerator[valid] / denominator[valid]
+    scores[valid] = covariance_sum[valid] / denominator[valid]
     return scores
 
 

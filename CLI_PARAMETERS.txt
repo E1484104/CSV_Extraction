@@ -170,7 +170,7 @@ python ultrasound_normalizer.py --root "../Tester1"
 归一化设置：
 - --x-column：指定用于横轴的列；默认优先 x_px，其次 x_value。
 - --y-column：指定用于纵轴的列；默认优先 y_px，其次 y_value。
-- --duration-s：把每个 CSV 自己的横轴范围映射到 0..duration_s，默认 29.8 秒。
+- --duration-s：把每个 CSV 自己的横轴范围映射到 0..duration_s，默认 29.68 秒。
 - --no-invert-y：不反转 y 轴；默认会把图像像素 y 轴转换成正常图表方向。
 
 
@@ -209,6 +209,7 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" --top 1 --p
 - 对比图窗口上方是完整 long 叠加图，下方最多 4 张匹配窗口分块细节图；下方细节图会分别按局部可见窗口缩放 long/short 的 y 轴范围。
 - 对比图使用双 y 轴：左侧是完整 long 数值列，右侧是所有 short 数值列，匹配窗口会用淡色背景标出；short 线半透明显示，方便看清下方 long 线。
 - 默认 metric=fusion；fusion 基于 Test11/Test22 模式调参，融合普通 Pearson、平滑导数相关、平滑 Pearson 和少量形态特征相关。
+- 三段 short 有序匹配时，默认会在 long CSV 中自动寻找 phase 1 之后最明显的“低谷到跃升”锚点，再把第二段 short 开头的 leading peak 对齐到该跃升区间内的 long raw 最高峰，并只在该理论起点前 0.5 秒、后 1 秒内按 --metric 选最高分。
 - score 越高表示波形越相像；rmse_z、mae_abs、rmse_abs 越低表示误差越小。
 
 常用参数：
@@ -226,6 +227,11 @@ python csv_interval_matcher.py --short "short.csv" --long "long.csv" --top 1 --p
 - --min-start-separation-s：输出结果之间的最小起始时间间隔；用于避免 top 5 全部挤在同一段。
 - --independent：使用 short-dir 时不做有序非重叠全局匹配，而是每个短 CSV 独立输出 top 匹配。
 - --ordered-gap-s：有序非重叠匹配时，区间之间额外要求的间隔。
+- --phase2-rise-constraint：三段有序匹配中的第二段跃升锚点约束；auto 默认开启，off 关闭。
+- --phase2-rise-align-to：第二段起点锚定方式；默认 leading_peak，即 long 跃升 raw 最高峰减去第二段 short 开头 leading peak offset；valley 可回到低谷锚定。
+- --phase2-rise-window-before-s / --phase2-rise-window-after-s：第二段起点相对理论锚点允许提前/延后的秒数，默认 0.5 和 1。
+- --phase2-rise-long-peak-after-s / --phase2-rise-short-peak-window-s：leading_peak 对齐时，long raw 最高峰和 short 开头峰的搜索窗口，默认 1 和 6 秒。
+- --phase2-rise-min-score / --phase2-rise-min-rise-z：控制“明显跃升”的强度门槛，默认 2 和 1。
 - --sample-method：nearest 或 linear；默认 linear。
 - --resample-points：每个候选窗口重采样为多少点后评分；默认 3000。
 - --smooth-window-points：平滑指标使用的移动平均窗口点数；默认 15。
