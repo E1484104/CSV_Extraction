@@ -4,6 +4,7 @@ import argparse
 import csv
 import math
 import random
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -504,11 +505,11 @@ def show_wearable_bpi_plot(
     figure, axis = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
     try:
         if y_column == BPI_NORMALIZED_COLUMN:
-            title = "Wearable BPI Normalized"
+            title = "Wearable BFI Normalized"
         elif y_column == BPI_SMOOTHED_COLUMN:
-            title = "Wearable BPI Smoothed"
+            title = "Wearable BFI Smoothed"
         else:
-            title = "Wearable BPI"
+            title = "Wearable BFI"
         if figure.canvas.manager is not None:
             figure.canvas.manager.set_window_title(title)
         figure.patch.set_facecolor("white")
@@ -521,7 +522,7 @@ def show_wearable_bpi_plot(
 
         axis.set_title(title, fontsize=14, pad=14)
         axis.set_xlabel(TIME_COLUMN)
-        axis.set_ylabel(y_column)
+        axis.set_ylabel(re.sub("bpi", "BFI", y_column, flags=re.IGNORECASE))
         axis.set_xlim(x_min, x_max)
         axis.set_ylim(min(0.0, y_min), y_max)
         axis.xaxis.set_major_locator(MaxNLocator(nbins=8))

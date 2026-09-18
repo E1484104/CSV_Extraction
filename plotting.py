@@ -19,9 +19,11 @@ OMIT_AFTER_PHASE1_S = 2.0
 OMITTED_DISPLAY_GAP_MIN_S = 5.0
 OMITTED_DISPLAY_GAP_RATIO = 0.12
 OMITTED_MARKER_SEPARATION_RATIO = 0.10
-PHASE_LABELS = ("Baseline", "Reperfusion", "Post-perfusion")
+PHASE_LABELS = ("Baseline", "Reperfusion", "Post-recovery")
 ULTRASOUND_AXIS_COLOR = "#6A4C93"
-NORMALIZED_ULTRASOUND_LABEL = "Normalized Ultrasound Data"
+WEARABLE_BFI_LABEL = "Wearable BFI"
+ULTRASOUND_SIGNAL_LABEL = "Ultrasound Signal"
+NORMALIZED_ULTRASOUND_LABEL = "Normalized Ultrasound-derived Signal"
 
 
 @dataclass(frozen=True)
@@ -479,7 +481,7 @@ def write_dual_axis_match_overlay_plot(
                     color=long_color,
                     linewidth=1.5,
                     alpha=LONG_OVERLAY_ALPHA,
-                    label="Wearable Data" if not long_line else "",
+                    label=WEARABLE_BFI_LABEL if not long_line else "",
                     zorder=2,
                 )
             )
@@ -509,7 +511,7 @@ def write_dual_axis_match_overlay_plot(
                     linewidth=1.8,
                     alpha=SHORT_OVERLAY_ALPHA,
                     label=(
-                        f"Ultrasound {_phase_label(index)}"
+                        f"Ultrasound {_phase_label(index)} Signal"
                     ),
                     zorder=3,
                 )
@@ -519,7 +521,7 @@ def write_dual_axis_match_overlay_plot(
 
         axis.set_title("Temporal Alignment and Waveform Comparison", fontsize=14, pad=14)
         axis.set_xlabel(f"Sample Time (s)")
-        axis.set_ylabel("Wearable Data", color=long_color)
+        axis.set_ylabel(WEARABLE_BFI_LABEL, color=long_color)
         short_axis.set_ylabel(short_y_label, color=ULTRASOUND_AXIS_COLOR)
         axis.set_xlim(x_min, x_max)
         axis.set_ylim(long_y_min, long_y_max)
@@ -527,7 +529,13 @@ def write_dual_axis_match_overlay_plot(
 
         axis.legend(
             [long_line[0], *legend_short_lines],
-            ["Wearable Data", *[f"Ultrasound {_phase_label(index)}" for index in range(len(legend_short_lines))]],
+            [
+                WEARABLE_BFI_LABEL,
+                *[
+                    f"Ultrasound {_phase_label(index)} Signal"
+                    for index in range(len(legend_short_lines))
+                ],
+            ],
             loc="best",
             frameon=False,
             fontsize=8,
@@ -621,7 +629,7 @@ def write_dual_axis_match_overlay_plot(
             detail_short_axis.set_ylim(detail_short_y_min, detail_short_y_max)
             detail_axis.set_xlabel("Sample Time (s)", fontsize=8)
             if index == 0:
-                detail_axis.set_ylabel("Wearable Data", color=long_color, fontsize=8)
+                detail_axis.set_ylabel(WEARABLE_BFI_LABEL, color=long_color, fontsize=8)
             if index == pane_count - 1:
                 detail_short_axis.set_ylabel(
                     NORMALIZED_ULTRASOUND_LABEL,
@@ -741,7 +749,7 @@ def write_paired_match_points_plot(
                 marker=marker,
                 markersize=marker_size,
                 alpha=LONG_OVERLAY_ALPHA,
-                label="Wearable paired points",
+                label=f"{WEARABLE_BFI_LABEL} paired points",
             )
             short_line = short_axis.plot(
                 xs,
@@ -751,7 +759,7 @@ def write_paired_match_points_plot(
                 marker=marker,
                 markersize=marker_size,
                 alpha=SHORT_OVERLAY_ALPHA,
-                label="Ultrasound paired points",
+                label=f"{ULTRASOUND_SIGNAL_LABEL} paired points",
             )
 
             x_min, x_max = _expanded_bounds(xs)
@@ -768,7 +776,7 @@ def write_paired_match_points_plot(
             short_axis.set_ylim(short_y_min, short_y_max)
             axis.set_xlabel("Sample Time (s)", fontsize=9)
             if index == 0:
-                axis.set_ylabel("Wearable paired value", color=long_color, fontsize=9)
+                axis.set_ylabel(WEARABLE_BFI_LABEL, color=long_color, fontsize=9)
             else:
                 axis.tick_params(axis="y", labelleft=False)
             if index == pane_count - 1:
@@ -913,7 +921,7 @@ def write_paired_window_overlay_zoom_plot(
             color=long_color,
             linewidth=1.5,
             alpha=LONG_OVERLAY_ALPHA,
-            label="Wearable",
+            label=WEARABLE_BFI_LABEL,
             zorder=2,
         )
 
@@ -932,7 +940,7 @@ def write_paired_window_overlay_zoom_plot(
                 color=color,
                 linewidth=1.8,
                 alpha=SHORT_OVERLAY_ALPHA,
-                label=f"Ultrasound {_phase_label(index)}",
+                label=f"Ultrasound {_phase_label(index)} Signal",
                 zorder=3,
             )
             overlay_axis.axvspan(
@@ -949,7 +957,7 @@ def write_paired_window_overlay_zoom_plot(
             fontsize=14,
             pad=14,
         )
-        overlay_axis.set_ylabel("Wearable Data", color=long_color)
+        overlay_axis.set_ylabel(WEARABLE_BFI_LABEL, color=long_color)
         overlay_short_axis.set_ylabel(
             _common_axis_label(
                 [window.short_label for window, _, _, _, _, _ in prepared],
@@ -1010,7 +1018,7 @@ def write_paired_window_overlay_zoom_plot(
                 color=long_color,
                 linewidth=1.35,
                 alpha=LONG_OVERLAY_ALPHA,
-                label="Wearable",
+                label=WEARABLE_BFI_LABEL,
                 zorder=2,
             )
             detail_short_axis.plot(
@@ -1019,7 +1027,7 @@ def write_paired_window_overlay_zoom_plot(
                 color=color,
                 linewidth=1.55,
                 alpha=SHORT_OVERLAY_ALPHA,
-                label="Ultrasound",
+                label=ULTRASOUND_SIGNAL_LABEL,
                 zorder=3,
             )
 
@@ -1050,7 +1058,7 @@ def write_paired_window_overlay_zoom_plot(
             )
             detail_axis.set_xlabel("Sample Time (s)", fontsize=9)
             if index == 0:
-                detail_axis.set_ylabel("Wearable Data", color=long_color, fontsize=9)
+                detail_axis.set_ylabel(WEARABLE_BFI_LABEL, color=long_color, fontsize=9)
             if index == pane_count - 1:
                 detail_short_axis.set_ylabel(
                     NORMALIZED_ULTRASOUND_LABEL,
@@ -1194,7 +1202,7 @@ def write_paired_window_rank_plot(
                 color=long_color,
                 linewidth=1.35,
                 alpha=LONG_OVERLAY_ALPHA,
-                label="Wearable",
+                label=WEARABLE_BFI_LABEL,
             )
             short_line = short_axis.plot(
                 xs,
@@ -1202,7 +1210,7 @@ def write_paired_window_rank_plot(
                 color=color,
                 linewidth=1.35,
                 alpha=SHORT_OVERLAY_ALPHA,
-                label="Ultrasound",
+                label=ULTRASOUND_SIGNAL_LABEL,
             )
 
             x_min, x_max = _expanded_bounds(xs)
@@ -1330,7 +1338,7 @@ def write_dual_axis_match_plot(
             color=long_color,
             linewidth=1.8,
             alpha=LONG_OVERLAY_ALPHA,
-            label=f"Wearable Data",
+            label=WEARABLE_BFI_LABEL,
         )
         short_line = short_axis.plot(
             short_xs,
@@ -1338,7 +1346,7 @@ def write_dual_axis_match_plot(
             color=short_color,
             linewidth=1.8,
             alpha=SHORT_OVERLAY_ALPHA,
-            label=f"Ultrasound Data",
+            label=ULTRASOUND_SIGNAL_LABEL,
         )
 
         axis.set_title(
